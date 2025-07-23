@@ -127,12 +127,26 @@ This creates platform-specific binaries in `src-tauri/target/release/bundle/`
 
 ## 🚧 Roadmap
 
-- [ ] **Actual Claude Code Integration**: Spawn real Claude Code processes
-- [ ] **Process Logging**: Real-time log viewing and management
-- [ ] **Task Queue**: Queue management for multiple tasks
-- [ ] **Configuration Management**: Settings and preferences
-- [ ] **Export/Import**: Backup and restore worktree configurations
-- [ ] **Performance Metrics**: Resource usage and performance monitoring
+### ✅ Completed Features
+- [x] **Claude Code Integration**: Real Claude Code process spawning with stream JSON parsing
+- [x] **Git Worktree Management**: Full git worktree operations (create, list, remove)
+- [x] **Real-time Process Monitoring**: Live status tracking and output streaming
+- [x] **Terminal Integration**: Persistent PTY sessions with xterm.js interface
+- [x] **Chat Interface**: Full chat UI with message history and status indicators
+- [x] **Permission Modes**: Safe and full permission modes for Claude processes
+- [x] **Cross-platform Support**: Linux, Windows, and macOS compatibility
+
+### 🔄 In Progress / Enhancements
+- [ ] **Enhanced Logging**: File-based logging with rotation and search capabilities
+- [ ] **Advanced Configuration**: Central config file and settings UI
+- [ ] **Error Recovery**: Automatic process restart and connection retry logic
+- [ ] **Performance Monitoring**: Resource usage and CPU/memory tracking
+
+### 📋 Future Features
+- [ ] **Task Queue System**: Queue management for multiple Claude operations
+- [ ] **Export/Import**: Comprehensive backup and restore functionality
+- [ ] **Theme Customization**: Dark mode and custom UI themes
+- [ ] **Plugin System**: Extensibility for custom integrations
 
 ## 🤝 Contributing
 
