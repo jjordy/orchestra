@@ -10,8 +10,7 @@ interface WorktreeManagerProps {
 export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManagerProps) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [repoPath, setRepoPath] = useState('');
-  const [branchName, setBranchName] = useState('');
-  const [worktreeName, setWorktreeName] = useState('');
+  const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [existingWorktrees, setExistingWorktrees] = useState<string[]>([]);
 
@@ -38,12 +37,12 @@ export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManage
 
   const handleCreateWorktree = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!repoPath || !branchName || !worktreeName) return;
+    if (!repoPath || !name) return;
 
     // Check if a worktree with similar name already exists
-    const proposedPath = `worktree-${worktreeName}`;
+    const proposedPath = `worktree-${name}`;
     const conflict = existingWorktrees.find(existing => 
-      existing.includes(proposedPath) || existing.includes(worktreeName)
+      existing.includes(proposedPath) || existing.includes(name)
     );
     
     if (conflict) {
@@ -53,10 +52,9 @@ export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManage
 
     setLoading(true);
     try {
-      await tauriService.createWorktree(repoPath, branchName, worktreeName);
+      await tauriService.createWorktree(repoPath, name, name);
       setRepoPath('');
-      setBranchName('');
-      setWorktreeName('');
+      setName('');
       setExistingWorktrees([]);
       setShowCreateForm(false);
       onRefresh();
@@ -68,11 +66,22 @@ export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManage
     }
   };
 
-  const handleRemoveWorktree = async (worktreeId: string) => {
-    if (!confirm('Are you sure you want to remove this worktree?')) return;
+  const handleRemoveWorktree = async (worktree: WorktreeConfig) => {
+    console.log('Attempting to remove worktree:', worktree);
+    
+    if (!confirm('Are you sure you want to remove this worktree?')) {
+      console.log('User cancelled worktree removal');
+      return;
+    }
+
+    console.log('User confirmed removal, calling backend with:', {
+      path: worktree.path,
+      base_repo: worktree.base_repo
+    });
 
     try {
-      await tauriService.removeWorktree(worktreeId);
+      await tauriService.removeWorktree(worktree.path, worktree.base_repo);
+      console.log('Worktree removed successfully, refreshing...');
       onRefresh();
     } catch (error) {
       console.error('Failed to remove worktree:', error);
@@ -112,24 +121,15 @@ export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManage
             )}
           </div>
           <div className="form-group">
-            <label>Branch Name:</label>
+            <label>Branch/Worktree Name:</label>
             <input
               type="text"
-              value={branchName}
-              onChange={(e) => setBranchName(e.target.value)}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
               placeholder="feature/new-branch"
               required
             />
-          </div>
-          <div className="form-group">
-            <label>Worktree Name:</label>
-            <input
-              type="text"
-              value={worktreeName}
-              onChange={(e) => setWorktreeName(e.target.value)}
-              placeholder="agent-1"
-              required
-            />
+            <small>This name will be used for both the branch and worktree</small>
           </div>
           <button type="submit" disabled={loading}>
             {loading ? 'Creating...' : 'Create Worktree'}
@@ -156,7 +156,7 @@ export default function WorktreeManager({ worktrees, onRefresh }: WorktreeManage
               </div>
               <div className="worktree-actions">
                 <button 
-                  onClick={() => handleRemoveWorktree(worktree.id)}
+                  onClick={() => handleRemoveWorktree(worktree)}
                   className="remove-btn"
                 >
                   Remove

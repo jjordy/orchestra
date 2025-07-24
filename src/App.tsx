@@ -1,19 +1,21 @@
 import { useState, useEffect } from "react";
-import { WorktreeConfig, WorktreeChat, AppState, GitWorktreeInfo } from "./types";
+import { WorktreeConfig, WorktreeChat, AppState, GitWorktreeInfo, Repository } from "./types";
 import { tauriService } from "./services/tauri";
 import RepoSelector from "./components/RepoSelector";
-import WorktreeSidebar from "./components/WorktreeSidebar";
+import RepositoryTree from "./components/RepositoryTree";
 import ChatWindow from "./components/ChatWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const LAST_REPO_KEY = 'orchestra-manager-last-repo';
+const REPOSITORIES_KEY = 'orchestra-manager-repositories';
 
 function App() {
   const [appState, setAppState] = useState<AppState>({
-    worktrees: [],
+    repositories: [],
+    worktrees: [], // Keep for backwards compatibility
     chats: {},
     selectedWorktree: undefined,
-    selectedRepo: undefined,
+    selectedRepo: undefined, // Keep for backwards compatibility
   });
 
   const [windowControls, setWindowControls] = useState({
@@ -37,15 +39,49 @@ function App() {
     testWindowControls();
   }, []);
 
-  // Load last used repository on startup
+  // Load saved repositories on startup
   useEffect(() => {
-    const lastRepo = localStorage.getItem(LAST_REPO_KEY);
-    if (lastRepo) {
-      loadWorktrees(lastRepo);
-    }
+    const loadSavedRepositories = async () => {
+      const savedRepos = localStorage.getItem(REPOSITORIES_KEY);
+      if (savedRepos) {
+        try {
+          const repoPaths: string[] = JSON.parse(savedRepos);
+          // Remove duplicates
+          const uniquePaths = [...new Set(repoPaths)];
+          
+          // Load repositories sequentially to avoid duplicates
+          for (const repoPath of uniquePaths) {
+            try {
+              await addRepository(repoPath, false); // Don't save while loading
+            } catch (error) {
+              console.error(`Failed to load repository ${repoPath}:`, error);
+            }
+          }
+          
+          // Update localStorage with deduplicated list
+          if (uniquePaths.length !== repoPaths.length) {
+            localStorage.setItem(REPOSITORIES_KEY, JSON.stringify(uniquePaths));
+          }
+        } catch (error) {
+          console.error('Failed to parse saved repositories:', error);
+        }
+      } else {
+        // Fallback to old single repo key for backwards compatibility
+        const lastRepo = localStorage.getItem(LAST_REPO_KEY);
+        if (lastRepo) {
+          addRepository(lastRepo);
+        }
+      }
+    };
+    loadSavedRepositories();
   }, []);
 
-  const loadWorktrees = async (repoPath: string) => {
+  const saveRepositoriesToStorage = (repositories: Repository[]) => {
+    const repoPaths = repositories.map(repo => repo.path);
+    localStorage.setItem(REPOSITORIES_KEY, JSON.stringify(repoPaths));
+  };
+
+  const refreshRepository = async (repoPath: string) => {
     try {
       const gitWorktrees = await tauriService.listGitWorktrees(repoPath);
       
@@ -56,13 +92,18 @@ function App() {
         return 0;
       });
 
+      const repoName = repoPath.split('/').pop() || 'Repository';
+      // Use base64 encoding of path to ensure unique and consistent ID
+      const repoId = `repo-${btoa(repoPath).replace(/[^a-zA-Z0-9]/g, '')}`;
+      const mainBranch = sortedWorktrees.find(wt => wt.is_main)?.branch || 'main';
+
       const worktrees: WorktreeConfig[] = sortedWorktrees.map((gitWt, index) => {
         const displayName = gitWt.is_main 
-          ? `${repoPath.split('/').pop()} (main)` 
+          ? `${repoName} (main)` 
           : gitWt.path.split('/').pop() || `Worktree ${index}`;
         
         return {
-          id: `worktree-${index}`,
+          id: `${repoId}-worktree-${index}`,
           name: displayName,
           path: gitWt.path,
           branch: gitWt.branch,
@@ -75,19 +116,165 @@ function App() {
         };
       });
 
-      // Save to localStorage on successful load
+      setAppState(prev => {
+        const existingRepoIndex = prev.repositories.findIndex(repo => repo.path === repoPath);
+        if (existingRepoIndex !== -1) {
+          // Update existing repository
+          const updatedRepositories = [...prev.repositories];
+          updatedRepositories[existingRepoIndex] = {
+            ...updatedRepositories[existingRepoIndex],
+            worktrees,
+            mainBranch,
+          };
+          
+          return {
+            ...prev,
+            repositories: updatedRepositories,
+            worktrees: [
+              ...prev.worktrees.filter(wt => wt.base_repo !== repoPath),
+              ...worktrees
+            ],
+          };
+        }
+        return prev;
+      });
+    } catch (error) {
+      console.error('Failed to refresh repository:', error);
+      throw error;
+    }
+  };
+
+  const addRepository = async (repoPath: string, shouldSave: boolean = true) => {
+    try {
+      // Use a ref to check current state to avoid stale closure issues
+      const currentState = await new Promise<AppState>(resolve => {
+        setAppState(prev => {
+          resolve(prev);
+          return prev;
+        });
+      });
+      
+      // Check if repository already exists
+      const existingRepo = currentState.repositories.find(repo => repo.path === repoPath);
+      if (existingRepo) {
+        // Refresh the existing repository and expand it
+        await refreshRepository(repoPath);
+        setAppState(prev => ({
+          ...prev,
+          repositories: prev.repositories.map(repo =>
+            repo.path === repoPath ? { ...repo, isExpanded: true } : { ...repo, isExpanded: false }
+          ),
+        }));
+        return;
+      }
+
+      const gitWorktrees = await tauriService.listGitWorktrees(repoPath);
+      
+      // Sort to put main repo first
+      const sortedWorktrees = gitWorktrees.sort((a, b) => {
+        if (a.is_main && !b.is_main) return -1;
+        if (!a.is_main && b.is_main) return 1;
+        return 0;
+      });
+
+      const repoName = repoPath.split('/').pop() || 'Repository';
+      // Use base64 encoding of path to ensure unique and consistent ID
+      const repoId = `repo-${btoa(repoPath).replace(/[^a-zA-Z0-9]/g, '')}`;
+      const mainBranch = sortedWorktrees.find(wt => wt.is_main)?.branch || 'main';
+
+      const worktrees: WorktreeConfig[] = sortedWorktrees.map((gitWt, index) => {
+        const displayName = gitWt.is_main 
+          ? `${repoName} (main)` 
+          : gitWt.path.split('/').pop() || `Worktree ${index}`;
+        
+        return {
+          id: `${repoId}-worktree-${index}`,
+          name: displayName,
+          path: gitWt.path,
+          branch: gitWt.branch,
+          base_repo: repoPath,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          is_main: gitWt.is_main,
+          is_bare: gitWt.is_bare,
+          is_detached: gitWt.is_detached,
+        };
+      });
+
+      const newRepository: Repository = {
+        id: repoId,
+        name: repoName,
+        path: repoPath,
+        isExpanded: true,
+        worktrees,
+        mainBranch,
+        loadedAt: new Date().toISOString(),
+      };
+
+      // Save to localStorage
       localStorage.setItem(LAST_REPO_KEY, repoPath);
 
-      setAppState(prev => ({
-        ...prev,
-        selectedRepo: repoPath,
-        worktrees,
-        selectedWorktree: worktrees[0]?.id,
-      }));
+      setAppState(prev => {
+        const newRepositories = [
+          ...prev.repositories.map(repo => ({ ...repo, isExpanded: false })), // Collapse others
+          newRepository
+        ];
+        
+        // Save all repository paths if shouldSave is true
+        if (shouldSave) {
+          saveRepositoriesToStorage(newRepositories);
+        }
+        
+        return {
+          ...prev,
+          repositories: newRepositories,
+          // Keep backwards compatibility
+          selectedRepo: repoPath,
+          worktrees: [...prev.worktrees, ...worktrees],
+          selectedWorktree: worktrees.find(wt => !wt.is_main)?.id,
+        };
+      });
     } catch (error) {
-      console.error('Failed to load worktrees:', error);
-      // Don't save invalid repo paths
+      console.error('Failed to add repository:', error);
+      throw error;
     }
+  };
+
+  const toggleRepository = (repositoryId: string) => {
+    setAppState(prev => ({
+      ...prev,
+      repositories: prev.repositories.map(repo =>
+        repo.id === repositoryId 
+          ? { ...repo, isExpanded: !repo.isExpanded }
+          : repo
+      )
+    }));
+  };
+
+  const removeRepository = (repositoryId: string) => {
+    setAppState(prev => {
+      const repoToRemove = prev.repositories.find(r => r.id === repositoryId);
+      if (!repoToRemove) return prev;
+
+      // Remove worktrees belonging to this repository
+      const remainingWorktrees = prev.worktrees.filter(wt => wt.base_repo !== repoToRemove.path);
+      
+      // If the selected worktree belongs to the removed repo, clear the selection
+      const selectedWorktreeBelongsToRepo = prev.selectedWorktree && 
+        repoToRemove.worktrees.some(wt => wt.id === prev.selectedWorktree);
+
+      const newRepositories = prev.repositories.filter(repo => repo.id !== repositoryId);
+      
+      // Update localStorage
+      saveRepositoriesToStorage(newRepositories);
+      
+      return {
+        ...prev,
+        repositories: newRepositories,
+        worktrees: remainingWorktrees,
+        selectedWorktree: selectedWorktreeBelongsToRepo ? undefined : prev.selectedWorktree,
+      };
+    });
   };
 
   const selectWorktree = (worktreeId: string) => {
@@ -143,15 +330,11 @@ function App() {
     });
   };
 
-  const createWorktree = async (branchName: string, worktreeName: string) => {
-    if (!appState.selectedRepo) {
-      throw new Error('No repository selected');
-    }
-
+  const createWorktree = async (repoPath: string, branchName: string, worktreeName: string) => {
     try {
-      await tauriService.createWorktree(appState.selectedRepo, branchName, worktreeName);
-      // Reload worktrees to include the new one
-      await loadWorktrees(appState.selectedRepo);
+      await tauriService.createWorktree(repoPath, branchName, worktreeName);
+      // Reload the specific repository to include the new worktree
+      await addRepository(repoPath);
     } catch (error) {
       console.error('Failed to create worktree:', error);
       throw error;
@@ -221,8 +404,7 @@ function App() {
         
         <div className="flex items-center space-x-4">
           <RepoSelector 
-            onRepoSelected={loadWorktrees}
-            selectedRepo={appState.selectedRepo}
+            onRepoSelected={addRepository}
           />
           <div className="text-xs text-claude-dark-500">
             {appState.worktrees.length} workspace{appState.worktrees.length !== 1 ? 's' : ''}
@@ -232,13 +414,15 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex min-h-0">
-        <WorktreeSidebar
-          worktrees={appState.worktrees}
+        <RepositoryTree
+          repositories={appState.repositories}
           selectedWorktree={appState.selectedWorktree}
           onWorktreeSelected={selectWorktree}
+          onRepositoryToggle={toggleRepository}
+          onRepositoryRemove={removeRepository}
+          onRepositoryRefresh={refreshRepository}
           chats={appState.chats}
           onCreateWorktree={createWorktree}
-          selectedRepo={appState.selectedRepo}
         />
         
         <div className="flex-1 flex flex-col min-w-0">

@@ -14,13 +14,23 @@ export default function Terminal({ worktreeId, worktreePath, onClose }: Terminal
   const [ptyId, setPtyId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   
-  const { terminal, isReady, write, onData } = useTerminal(terminalRef);
+  const { terminal, isReady, write, onData, fit } = useTerminal(terminalRef);
 
   useEffect(() => {
     if (!terminal || !isReady) return;
 
     initializePty();
   }, [terminal, isReady]);
+
+  // Trigger terminal fit on mount and when ready
+  useEffect(() => {
+    if (isReady) {
+      // Small delay to ensure DOM is fully rendered
+      setTimeout(() => {
+        fit();
+      }, 100);
+    }
+  }, [isReady, fit]);
 
   const initializePty = async () => {
     if (!terminal) return;
@@ -136,8 +146,7 @@ export default function Terminal({ worktreeId, worktreePath, onClose }: Terminal
       </div>
       <div 
         ref={terminalRef} 
-        className="terminal-content flex-1"
-        style={{ minHeight: '400px' }}
+        className="terminal-content flex-1 h-full"
       />
     </div>
   );

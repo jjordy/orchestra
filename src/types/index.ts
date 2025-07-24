@@ -44,9 +44,21 @@ export interface GitWorktreeInfo {
   is_detached: boolean;
 }
 
-export interface AppState {
-  selectedRepo?: string;
+export interface Repository {
+  id: string;
+  name: string;
+  path: string;
+  isExpanded: boolean;
   worktrees: WorktreeConfig[];
+  mainBranch: string;
+  loadedAt: string;
+}
+
+export interface AppState {
+  repositories: Repository[];
   chats: Record<string, WorktreeChat>;
   selectedWorktree?: string;
+  // Keep for backwards compatibility during transition
+  selectedRepo?: string;
+  worktrees: WorktreeConfig[];
 }

@@ -29,17 +29,29 @@
 
 /* Terminal styling */
 @layer components {
+  .terminal-content {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+  }
+  
   .terminal-content .xterm {
     height: 100% !important;
     width: 100% !important;
+    padding: 0.5rem;
   }
   
   .terminal-content .xterm-viewport {
     background: #0f172a !important;
+    height: 100% !important;
+    width: 100% !important;
   }
   
   .terminal-content .xterm-screen {
     background: #0f172a !important;
+    height: 100% !important;
+    width: 100% !important;
   }
 }
 

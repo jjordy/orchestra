@@ -444,6 +444,44 @@ pub struct GitWorktreeInfo {
 }
 
 #[tauri::command]
+async fn validate_git_repo(repo_path: String) -> Result<String, String> {
+    // Check if directory exists
+    if !std::path::Path::new(&repo_path).exists() {
+        return Err("Directory does not exist".to_string());
+    }
+    
+    if !std::path::Path::new(&repo_path).is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    // Check if it's a git repository
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|_| "Not a git repository".to_string())?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    // Check if we can access worktrees
+    let worktree_output = Command::new("git")
+        .arg("worktree")
+        .arg("list")
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|_| "Failed to access git worktrees".to_string())?;
+
+    if !worktree_output.status.success() {
+        return Err("Failed to access git worktrees".to_string());
+    }
+
+    Ok("Valid git repository".to_string())
+}
+
+#[tauri::command]
 async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, String> {
     let output = Command::new("git")
         .arg("worktree")
@@ -513,22 +551,132 @@ async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, S
 }
 
 #[tauri::command]
+async fn check_worktree_status(
+    worktree_path: String,
+) -> Result<(bool, bool), String> {
+    // First check if worktree has uncommitted changes
+    let status_output = Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to check worktree status: {}", e))?;
+
+    if !status_output.status.success() {
+        return Err(format!(
+            "Failed to check worktree status: {}",
+            String::from_utf8_lossy(&status_output.stderr)
+        ));
+    }
+
+    let has_changes = !status_output.stdout.is_empty();
+    
+    // Check if branch has unpushed commits
+    let branch_status = Command::new("git")
+        .args(&["log", "@{u}..", "--oneline"])
+        .current_dir(&worktree_path)
+        .output();
+
+    let has_unpushed = match branch_status {
+        Ok(output) => !output.stdout.is_empty(),
+        Err(_) => {
+            // If we can't check upstream, assume no unpushed commits
+            // This handles cases where there's no upstream branch set
+            false
+        }
+    };
+
+    Ok((has_changes, has_unpushed))
+}
+
+#[tauri::command]
 async fn remove_worktree(
     state: State<'_, AppState>,
-    worktree_id: String,
+    worktree_path: String,
+    repo_path: String,
+    force: Option<bool>,
 ) -> Result<(), String> {
-    let mut worktrees = state.worktrees.lock().unwrap();
-    let worktree = worktrees
-        .get(&worktree_id)
-        .ok_or("Worktree not found")?
-        .clone();
+    // First check if worktree has uncommitted changes
+    let status_output = Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to check worktree status: {}", e))?;
 
-    let output = Command::new("git")
+    if !status_output.status.success() {
+        return Err(format!(
+            "Failed to check worktree status: {}",
+            String::from_utf8_lossy(&status_output.stderr)
+        ));
+    }
+
+    let has_changes = !status_output.stdout.is_empty();
+    
+    // Check if branch has unpushed commits
+    let branch_status = Command::new("git")
+        .args(&["log", "@{u}..", "--oneline"])
+        .current_dir(&worktree_path)
+        .output();
+
+    let has_unpushed = match branch_status {
+        Ok(output) => !output.stdout.is_empty(),
+        Err(_) => {
+            // If we can't check upstream, assume no unpushed commits
+            // This handles cases where there's no upstream branch set
+            false
+        }
+    };
+
+    if (has_changes || has_unpushed) && !force.unwrap_or(false) {
+        let mut errors = Vec::new();
+        if has_changes {
+            errors.push("uncommitted changes");
+        }
+        if has_unpushed {
+            errors.push("unpushed commits");
+        }
+        return Err(format!(
+            "Cannot remove worktree: it has {}. Use force option to remove anyway.",
+            errors.join(" and ")
+        ));
+    }
+
+    // Get the branch name associated with this worktree before deletion
+    let branch_output = Command::new("git")
+        .args(&["branch", "--show-current"])
+        .current_dir(&worktree_path)
+        .output();
+    
+    let branch_name = if let Ok(output) = branch_output {
+        if output.status.success() {
+            let branch_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !branch_name.is_empty() && branch_name != "main" && branch_name != "master" {
+                Some(branch_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Remove the worktree
+    let mut remove_cmd = Command::new("git");
+    remove_cmd
         .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(&worktree.path)
-        .current_dir(&worktree.base_repo)
+        .arg("remove");
+    
+    if force.unwrap_or(false) {
+        remove_cmd.arg("--force");
+    }
+    
+    remove_cmd.arg(&worktree_path);
+    
+    let output = remove_cmd
+        .current_dir(&repo_path)
         .output()
         .map_err(|e| format!("Failed to remove worktree: {}", e))?;
 
@@ -539,7 +687,31 @@ async fn remove_worktree(
         ));
     }
 
-    worktrees.remove(&worktree_id);
+    // Delete the branch if we found one and it's not a main branch
+    if let Some(branch) = branch_name {
+        let delete_branch_output = Command::new("git")
+            .args(&["branch", "-D", &branch])
+            .current_dir(&repo_path)
+            .output();
+        
+        if let Ok(output) = delete_branch_output {
+            if !output.status.success() {
+                eprintln!("Warning: Failed to delete branch '{}': {}", 
+                    branch, String::from_utf8_lossy(&output.stderr));
+            }
+        }
+    }
+
+    // Also remove from backend state if it exists (for worktrees created via backend)
+    let mut worktrees = state.worktrees.lock().unwrap();
+    let worktree_to_remove = worktrees.iter()
+        .find(|(_, wt)| wt.path == worktree_path)
+        .map(|(id, _)| id.clone());
+    
+    if let Some(id) = worktree_to_remove {
+        worktrees.remove(&id);
+    }
+
     Ok(())
 }
 
@@ -791,15 +963,18 @@ async fn close_pty(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             create_worktree,
             list_worktrees,
+            validate_git_repo,
             list_git_worktrees,
             start_claude_process,
             send_message_to_claude,
             stop_claude_process,
             list_processes,
+            check_worktree_status,
             remove_worktree,
             create_pty,
             create_worktree_pty,

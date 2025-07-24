@@ -1,49 +1,64 @@
 import { useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { FolderOpen, Plus } from 'lucide-react';
+import { tauriService } from '../services/tauri';
 
 interface RepoSelectorProps {
   onRepoSelected: (repoPath: string) => void;
-  selectedRepo?: string;
 }
 
-export default function RepoSelector({ onRepoSelected, selectedRepo }: RepoSelectorProps) {
-  const [repoPath, setRepoPath] = useState(selectedRepo || '');
+export default function RepoSelector({ onRepoSelected }: RepoSelectorProps) {
   const [loading, setLoading] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!repoPath.trim()) return;
-
+  const handleAddRepository = async () => {
+    setValidationError(null);
     setLoading(true);
+    
     try {
-      await onRepoSelected(repoPath.trim());
+      const selected = await open({
+        directory: true,
+        title: 'Select Git Repository Folder'
+      });
+      
+      if (selected) {
+        // First validate the repository
+        await tauriService.validateGitRepo(selected);
+        
+        // If validation passes, load the repository
+        await onRepoSelected(selected);
+      }
     } catch (error) {
-      console.error('Failed to load repository:', error);
-      alert('Failed to load repository. Please check the path and try again.');
+      console.error('Repository selection or validation failed:', error);
+      const errorMessage = typeof error === 'string' ? error : 'Failed to add repository';
+      setValidationError(errorMessage);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex items-center space-x-3 no-drag">
-      <form onSubmit={handleSubmit} className="flex items-center space-x-2">
-        <input
-          type="text"
-          value={repoPath}
-          onChange={(e) => setRepoPath(e.target.value)}
-          placeholder="Enter git repository path..."
-          className="text-sm bg-claude-dark-700 border border-claude-dark-600 rounded px-3 py-1.5 placeholder-claude-dark-500 text-white focus:outline-none focus:border-claude-dark-400 min-w-0"
-          style={{ width: '300px' }}
-          disabled={loading}
-        />
-        <button 
-          type="submit" 
-          disabled={loading || !repoPath.trim()}
-          className="text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-claude-dark-700 disabled:text-claude-dark-500 text-white rounded px-3 py-1.5 transition-colors whitespace-nowrap"
-        >
-          {loading ? 'Loading...' : 'Load'}
-        </button>
-      </form>
+    <div className="flex flex-col space-y-2 no-drag">
+      <button
+        onClick={handleAddRepository}
+        disabled={loading}
+        className="flex items-center space-x-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-claude-dark-700 disabled:text-claude-dark-500 text-white rounded px-3 py-2 transition-colors"
+      >
+        {loading ? (
+          <>Loading...</>
+        ) : (
+          <>
+            <Plus size={16} />
+            <FolderOpen size={16} />
+            <span>Add Repository</span>
+          </>
+        )}
+      </button>
+      {validationError && (
+        <div className="text-sm text-red-400 px-3">
+          {validationError}
+        </div>
+      )}
     </div>
   );
 }

@@ -35,8 +35,8 @@ const DEFAULT_THEME = {
 
 const DEFAULT_CONFIG: TerminalConfig = {
   theme: DEFAULT_THEME,
-  fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace',
-  fontSize: 14,
+  fontFamily: 'JetBrains Mono, Monaco, Menlo, "Ubuntu Mono", monospace',
+  fontSize: 16,
   lineHeight: 1.2,
   cursorBlink: true,
 };
@@ -89,8 +89,15 @@ export function useTerminal(
 
     window.addEventListener('resize', handleResize);
 
+    // Create ResizeObserver to handle container resize
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+    resizeObserver.observe(containerRef.current);
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       
       try {
         xterm.dispose();

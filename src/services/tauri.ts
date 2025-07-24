@@ -18,8 +18,24 @@ export const tauriService = {
     return await invoke('list_worktrees');
   },
 
-  async removeWorktree(worktreeId: string): Promise<void> {
-    return await invoke('remove_worktree', { worktreeId });
+  async checkWorktreeStatus(worktreePath: string): Promise<[boolean, boolean]> {
+    return await invoke('check_worktree_status', { worktreePath });
+  },
+
+  async removeWorktree(worktreePath: string, repoPath: string, force?: boolean): Promise<void> {
+    console.log('TauriService: Calling remove_worktree with:', { worktreePath, repoPath, force });
+    try {
+      const result = await invoke('remove_worktree', { 
+        worktreePath, 
+        repoPath, 
+        force 
+      });
+      console.log('TauriService: remove_worktree succeeded:', result);
+      return result;
+    } catch (error) {
+      console.error('TauriService: remove_worktree failed:', error);
+      throw error;
+    }
   },
 
   async startClaudeProcess(
@@ -28,7 +44,12 @@ export const tauriService = {
     userMessage: string,
     permissionMode?: string
   ): Promise<ClaudeProcess> {
-    return await invoke('start_claude_process', { worktreePath, worktreeId, userMessage, permissionMode });
+    return await invoke('start_claude_process', { 
+      worktreePath, 
+      worktreeId, 
+      userMessage, 
+      permissionMode 
+    });
   },
 
   async sendMessageToClaude(
@@ -37,7 +58,12 @@ export const tauriService = {
     message: string,
     permissionMode?: string
   ): Promise<void> {
-    return await invoke('send_message_to_claude', { worktreePath, worktreeId, message, permissionMode });
+    return await invoke('send_message_to_claude', { 
+      worktreePath, 
+      worktreeId, 
+      message, 
+      permissionMode 
+    });
   },
 
   async stopClaudeProcess(processId: string): Promise<void> {
@@ -46,6 +72,10 @@ export const tauriService = {
 
   async listProcesses(): Promise<ClaudeProcess[]> {
     return await invoke('list_processes');
+  },
+
+  async validateGitRepo(repoPath: string): Promise<string> {
+    return await invoke('validate_git_repo', { repoPath });
   },
 
   async listGitWorktrees(repoPath: string): Promise<GitWorktreeInfo[]> {

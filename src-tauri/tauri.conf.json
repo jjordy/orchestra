@@ -9,6 +9,9 @@
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
+  "plugins": {
+    "dialog": null
+  },
   "app": {
     "windows": [
       {
@@ -40,7 +43,10 @@
             "core:window:allow-is-maximized",
             "core:event:allow-listen",
             "core:event:allow-emit",
-            "core:event:default"
+            "core:event:default",
+            "dialog:allow-open",
+            "dialog:allow-message",
+            "dialog:default"
           ]
         }
       ]
