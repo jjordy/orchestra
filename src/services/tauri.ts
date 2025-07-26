@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { WorktreeConfig, ClaudeProcess, GitWorktreeInfo } from '../types';
+import { WorktreeConfig, ClaudeProcess, GitWorktreeInfo, McpServerConfig, ApprovalRequest, ApprovalResponse } from '../types';
 
 export const tauriService = {
   async createWorktree(
@@ -82,24 +82,43 @@ export const tauriService = {
     return await invoke('list_git_worktrees', { repoPath });
   },
 
-  // PTY Terminal Methods
-  async createPty(workingDir: string): Promise<string> {
-    return await invoke('create_pty', { workingDir });
+
+  // MCP Server Methods
+  async createMcpServer(worktreeId: string, worktreePath: string): Promise<string> {
+    return await invoke('create_mcp_server', { worktreeId, worktreePath });
   },
 
-  async createWorktreePty(ptyId: string, workingDir: string): Promise<string> {
-    return await invoke('create_worktree_pty', { ptyId, workingDir });
+  async stopMcpServer(serverId: string): Promise<void> {
+    return await invoke('stop_mcp_server', { serverId });
   },
 
-  async writeToPty(ptyId: string, data: string): Promise<void> {
-    return await invoke('write_to_pty', { ptyId, data });
+  async listMcpServers(): Promise<McpServerConfig[]> {
+    return await invoke('list_mcp_servers');
   },
 
-  async resizePty(ptyId: string, cols: number, rows: number): Promise<void> {
-    return await invoke('resize_pty', { ptyId, cols, rows });
+  async getMcpServerStatus(serverId: string): Promise<boolean> {
+    return await invoke('get_mcp_server_status', { serverId });
   },
 
-  async closePty(ptyId: string): Promise<void> {
-    return await invoke('close_pty', { ptyId });
+  async requestToolApproval(request: ApprovalRequest): Promise<string> {
+    return await invoke('request_tool_approval', { request });
+  },
+
+  async respondToApproval(approvalId: string, response: ApprovalResponse): Promise<void> {
+    // Convert lowercase MCP protocol behavior to uppercase Rust backend format
+    const convertedResponse = {
+      ...response,
+      behavior: response.behavior === 'allow' ? 'Allow' : 'Deny'
+    };
+    console.log('Frontend sending approval:', { 
+      original: response, 
+      converted: convertedResponse,
+      approvalId 
+    });
+    return await invoke('respond_to_approval', { approvalId, response: convertedResponse });
+  },
+
+  async getPendingApprovals(): Promise<Array<[string, ApprovalRequest]>> {
+    return await invoke('get_pending_approvals');
   },
 };

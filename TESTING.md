@@ -2,36 +2,34 @@
 
 ## Overview
 
-This document describes the comprehensive test suite for Orchestra Manager, a cross-platform GUI application for managing git worktrees with embedded Claude Code instances.
+This document describes the comprehensive test suite for Orchestra Manager, a cross-platform GUI application for managing git worktrees with embedded Claude Code instances and MCP-based approval workflows.
 
 ## Test Architecture
 
 ### Frontend Tests (TypeScript/React)
-- **Framework**: Vitest + React Testing Library
+- **Framework**: Vitest + React Testing Library + @vitest/coverage-v8
 - **Location**: `src/test/`
-- **Coverage**: Components, services, integration tests
+- **Coverage**: Components, services, integration tests, approval workflow
+- **Coverage Target**: 80-90% depending on component criticality
 
 ### Backend Tests (Rust)
-- **Framework**: Built-in Rust testing + tokio-test
-- **Location**: `src-tauri/src/tests.rs`
-- **Coverage**: PTY management, worktree operations, Claude processes
+- **Framework**: Built-in Rust testing + tokio-test + cargo tarpaulin (for coverage)
+- **Location**: `src-tauri/src/tests.rs` & `src-tauri/src/tests_extended.rs`
+- **Coverage**: Worktree operations, Claude processes, MCP manager, JSON parsing
+
+### MCP Server Tests (TypeScript/Node.js)
+- **Framework**: Jest + @types/jest
+- **Location**: `mcp-server/src/__tests__/`
+- **Coverage**: File operations, security, approval system, command execution
 
 ## Test Categories
 
 ### 1. Unit Tests
 
-#### Terminal Component (`src/test/Terminal.test.tsx`)
-- **Component Rendering**: Verifies terminal UI elements display correctly
-- **PTY Session Management**: Tests session creation, reuse, and isolation
-- **User Interactions**: Tests button clicks, keyboard input handling
-- **Session Persistence**: Verifies state preservation across component lifecycles
-- **Auto-launch Claude**: Tests Claude Code initialization for new/existing sessions
-- **Error Handling**: Tests graceful failure handling
-
 #### Tauri Service (`src/test/tauri.test.ts`)
 - **Worktree Management**: CRUD operations for git worktrees
 - **Claude Process Management**: Process lifecycle and communication
-- **PTY Terminal Operations**: Terminal creation, I/O, and cleanup
+- **Claude Process Operations**: Process creation and cleanup
 - **Error Handling**: Network failures, timeouts, invalid inputs
 
 #### Chat Window (`src/test/ChatWindow.test.tsx`)
@@ -63,31 +61,38 @@ This document describes the comprehensive test suite for Orchestra Manager, a cr
 
 ### Quick Start
 ```bash
-# Run all tests
-npm run test
+# Run all tests across all components
+npm run test:all
 
-# Run tests with coverage
-npm run test:coverage
+# Run all tests with coverage
+npm run test:all:coverage
 
-# Run tests in watch mode
-npm run test
+# Run tests in CI mode
+npm run test:ci
 
-# Run backend tests only
-cd src-tauri && cargo test
+# Run specific component tests
+npm run test:run          # Frontend only
+npm run test:rust         # Backend only  
+npm run test:mcp          # MCP server only
 
-# Run comprehensive test suite
-npm run test:run
+# Watch mode for development
+npm run test:watch        # Frontend watch mode
 ```
 
 ### Test Commands
 
 | Command | Description |
 |---------|-------------|
-| `npm run test` | Interactive test runner |
-| `npm run test:run` | Run all tests once |
-| `npm run test:ui` | Visual test interface |
-| `npm run test:coverage` | Generate coverage report |
-| `cargo test` | Run Rust backend tests |
+| `npm run test:all` | Run all tests (frontend + backend + MCP) |
+| `npm run test:all:coverage` | Run all tests with coverage reports |
+| `npm run test:ci` | CI-optimized test run with verbose output |
+| `npm run test:run` | Frontend tests only |
+| `npm run test:coverage` | Frontend tests with coverage |
+| `npm run test:ui` | Visual test interface (frontend) |
+| `npm run test:watch` | Frontend tests in watch mode |
+| `npm run test:rust` | Rust backend tests only |
+| `npm run test:mcp` | MCP server tests only |
+| `npm run test:mcp:coverage` | MCP server tests with coverage |
 
 ### Test Configuration
 
@@ -225,13 +230,13 @@ jobs:
 ### Debug Commands
 ```bash
 # Run specific test file
-npm run test Terminal.test.tsx
+npm run test ChatWindow.test.tsx
 
 # Run with verbose output
 npm run test -- --reporter=verbose
 
 # Debug individual test
-npm run test -- --reporter=verbose -t "creates PTY session"
+npm run test -- --reporter=verbose -t "creates worktree"
 ```
 
 ## Best Practices

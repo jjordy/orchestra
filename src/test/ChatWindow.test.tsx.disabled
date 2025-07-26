@@ -1,0 +1,644 @@
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import ChatWindow from '../components/ChatWindow';
+import { tauriService } from '../services/tauri';
+import type { WorktreeConfig, WorktreeChat, ChatMessage } from '../types';
+
+describe('ChatWindow Component', () => {
+  const defaultWorktree: WorktreeConfig = {
+    id: 'test-worktree-1',
+    name: 'Feature Branch',
+    path: '/home/test/feature-branch',
+    branch: 'feature-branch',
+    base_repo: '/home/test/main-repo',
+    is_active: true,
+    created_at: '2024-01-01T00:00:00Z',
+    is_main: false,
+    is_bare: false,
+    is_detached: false,
+  };
+
+  const defaultChat: WorktreeChat = {
+    worktree_id: 'test-worktree-1',
+    messages: [],
+  };
+
+  const defaultProps = {
+    worktree: defaultWorktree,
+    chat: defaultChat,
+    onChatUpdated: vi.fn(),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    
+    // Mock MCP server operations
+    vi.mocked(tauriService.createMcpServer).mockResolvedValue('mcp-server-1');
+    vi.mocked(tauriService.getMcpServerStatus).mockResolvedValue(true);
+    vi.mocked(tauriService.listMcpServers).mockResolvedValue([{
+      id: 'mcp-server-1',
+      worktree_id: 'test-worktree-1',
+      worktree_path: '/home/test/feature-branch',
+      status: 'running',
+      port: 3000,
+      created_at: '2024-01-01T00:00:00Z',
+    }]);
+    
+    // Mock Claude process operations
+    vi.mocked(tauriService.startClaudeProcess).mockResolvedValue({
+      id: 'process-1',
+      worktree_id: 'test-worktree-1',
+      status: 'running',
+      pid: 12345,
+      started_at: '2024-01-01T00:00:00Z',
+    });
+    vi.mocked(tauriService.sendMessageToClaude).mockResolvedValue(undefined);
+    vi.mocked(tauriService.respondToApproval).mockResolvedValue(undefined);
+    vi.mocked(tauriService.getPendingApprovals).mockResolvedValue([]);
+    
+    // Mock event listener
+    global.mockListen.mockResolvedValue(() => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe('Component Rendering', () => {
+    it('renders chat interface with worktree information', async () => {
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} />);
+      });
+      
+      expect(screen.getByText('Feature Branch')).toBeInTheDocument();
+      expect(screen.getByText('/home/test/feature-branch')).toBeInTheDocument();
+      expect(screen.getByText('No messages yet')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Type your message to Claude...')).toBeInTheDocument();
+    });
+
+    it('displays MCP server status', async () => {
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} />);
+      });
+
+      // Wait for MCP server to be initialized
+      await waitFor(() => {
+        expect(screen.getByText('MCP Server Ready')).toBeInTheDocument();
+      });
+    });
+
+    it('displays existing messages', async () => {
+      const chatWithMessages: WorktreeChat = {
+        ...defaultChat,
+        messages: [
+          {
+            id: 'msg-1',
+            worktree_id: 'test-worktree-1',
+            role: 'user',
+            content: 'Hello Claude',
+            timestamp: '2024-01-01T00:00:00Z',
+            status: 'sent',
+          },
+          {
+            id: 'msg-2',
+            worktree_id: 'test-worktree-1',
+            role: 'assistant',
+            content: 'Hello! How can I help?',
+            timestamp: '2024-01-01T00:01:00Z',
+            status: 'sent',
+          },
+        ],
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithMessages} />);
+      });
+
+      expect(screen.getByText('Hello Claude')).toBeInTheDocument();
+      expect(screen.getByText('Hello! How can I help?')).toBeInTheDocument();
+    });
+  });
+
+  describe('Message Sending', () => {
+    it('sends user message and starts Claude process', async () => {
+      const user = userEvent.setup();
+      const onChatUpdated = vi.fn();
+      
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Wait for MCP server initialization
+      await waitFor(() => {
+        expect(screen.getByText('MCP Server Ready')).toBeInTheDocument();
+      });
+
+      const input = screen.getByPlaceholderText('Type your message to Claude...');
+      const sendButton = screen.getByText('Send');
+
+      await act(async () => {
+        await user.type(input, 'Hello Claude');
+        await user.click(sendButton);
+      });
+
+      // Should add user message immediately
+      expect(onChatUpdated).toHaveBeenCalledWith(
+        expect.any(Function)
+      );
+
+      // Should start Claude process
+      await waitFor(() => {
+        expect(tauriService.startClaudeProcess).toHaveBeenCalledWith(
+          '/home/test/feature-branch',
+          'test-worktree-1',
+          'Hello Claude',
+          'mcp'
+        );
+      });
+    });
+
+    it('prevents sending empty messages', async () => {
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} />);
+      });
+
+      // Wait for MCP server initialization
+      await waitFor(() => {
+        expect(screen.getByText('MCP Server Ready')).toBeInTheDocument();
+      });
+
+      const sendButton = screen.getByText('Send');
+      expect(sendButton).toBeDisabled();
+
+      const input = screen.getByPlaceholderText('Type your message to Claude...');
+      await act(async () => {
+        await userEvent.setup().type(input, '   '); // Only whitespace
+      });
+
+      expect(sendButton).toBeDisabled();
+    });
+
+    it('handles send message error', async () => {
+      const user = userEvent.setup();
+      const onChatUpdated = vi.fn();
+      
+      // Reset to default successful mocks first
+      vi.mocked(tauriService.createMcpServer).mockResolvedValue('mcp-server-1');
+      vi.mocked(tauriService.getMcpServerStatus).mockResolvedValue(true);
+      
+      // Then set up the error case
+      vi.mocked(tauriService.startClaudeProcess).mockRejectedValue(
+        new Error('Process failed')
+      );
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Wait for MCP server initialization
+      await waitFor(() => {
+        expect(screen.getByText('MCP Server Ready')).toBeInTheDocument();
+      });
+
+      const input = screen.getByPlaceholderText('Type your message to Claude...');
+      await act(async () => {
+        await user.type(input, 'Test message');
+        await user.click(screen.getByText('Send'));
+      });
+
+      await waitFor(() => {
+        expect(onChatUpdated).toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('Process Status Display', () => {
+    it('shows Claude process status', async () => {
+      const chatWithProcess: WorktreeChat = {
+        ...defaultChat,
+        process: {
+          id: 'process-1',
+          worktree_id: 'test-worktree-1',
+          status: 'running',
+          pid: 12345,
+          started_at: '2024-01-01T00:00:00Z',
+        },
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithProcess} />);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('Working')).toBeInTheDocument();
+      });
+    });
+
+    it('shows different Claude process states', async () => {
+      const statuses = [
+        { status: 'completed', text: 'Completed' },
+        { status: 'idle', text: 'Idle' },
+      ] as const;
+
+      for (const { status, text } of statuses) {
+        const chatWithProcess: WorktreeChat = {
+          ...defaultChat,
+          process: {
+            id: 'process-1',
+            worktree_id: 'test-worktree-1',
+            status,
+          },
+        };
+
+        const { unmount } = render(<ChatWindow {...defaultProps} chat={chatWithProcess} />);
+        
+        await waitFor(() => {
+          expect(screen.getByText(text)).toBeInTheDocument();
+        });
+        
+        unmount();
+      }
+    });
+  });
+
+  describe('Approval Workflow', () => {
+    it('displays approval requests', async () => {
+      const chatWithApproval: WorktreeChat = {
+        ...defaultChat,
+        messages: [
+          {
+            id: 'approval-1',
+            worktree_id: 'test-worktree-1',
+            role: 'approval',
+            content: 'Claude wants to write file: example.txt',
+            timestamp: '2024-01-01T00:00:00Z',
+            status: 'sent',
+            approvalRequest: {
+              approvalId: 'approval-1',
+              toolName: 'write_file',
+              input: { path: 'example.txt', content: 'Hello World' },
+            },
+          },
+        ],
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithApproval} />);
+      });
+
+      expect(screen.getByText('Permission Request')).toBeInTheDocument();
+      expect(screen.getByText('Claude wants to write file')).toBeInTheDocument();
+      expect(screen.getByText('Approve')).toBeInTheDocument();
+      expect(screen.getByText('Deny')).toBeInTheDocument();
+    });
+
+    it('handles approval response', async () => {
+      const user = userEvent.setup();
+      const onChatUpdated = vi.fn();
+      
+      const chatWithApproval: WorktreeChat = {
+        ...defaultChat,
+        messages: [
+          {
+            id: 'approval-1',
+            worktree_id: 'test-worktree-1',
+            role: 'approval',
+            content: 'Claude wants to write file: example.txt',
+            timestamp: '2024-01-01T00:00:00Z',
+            status: 'sent',
+            approvalRequest: {
+              approvalId: 'approval-1',
+              toolName: 'write_file',
+              input: { path: 'example.txt', content: 'Hello World' },
+            },
+          },
+        ],
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithApproval} onChatUpdated={onChatUpdated} />);
+      });
+
+      const approveButton = screen.getByText('Approve');
+      await act(async () => {
+        await user.click(approveButton);
+      });
+
+      expect(tauriService.respondToApproval).toHaveBeenCalledWith('approval-1', {
+        behavior: 'allow',
+      });
+
+      expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it('handles denial response', async () => {
+      const user = userEvent.setup();
+      const onChatUpdated = vi.fn();
+      
+      const chatWithApproval: WorktreeChat = {
+        ...defaultChat,
+        messages: [
+          {
+            id: 'approval-1',
+            worktree_id: 'test-worktree-1',
+            role: 'approval',
+            content: 'Claude wants to write file: example.txt',
+            timestamp: '2024-01-01T00:00:00Z',
+            status: 'sent',
+            approvalRequest: {
+              approvalId: 'approval-1',
+              toolName: 'write_file',
+              input: { path: 'example.txt', content: 'Hello World' },
+            },
+          },
+        ],
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithApproval} onChatUpdated={onChatUpdated} />);
+      });
+
+      const denyButton = screen.getByText('Deny');
+      await act(async () => {
+        await user.click(denyButton);
+      });
+
+      expect(tauriService.respondToApproval).toHaveBeenCalledWith('approval-1', {
+        behavior: 'deny',
+        message: 'User denied permission for this operation',
+      });
+
+      expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+    });
+  });
+
+  describe('Event Listeners', () => {
+    it('handles Claude output events', async () => {
+      const onChatUpdated = vi.fn();
+      
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Simulate Claude output event
+      const mockEvent = {
+        payload: {
+          process_id: 'process-1',
+          content: 'Claude response',
+          timestamp: '2024-01-01T00:00:00Z',
+        },
+      };
+
+      // Get the event listener that was registered
+      const listenCalls = global.mockListen.mock.calls;
+      const claudeOutputListener = listenCalls.find(call => call[0] === 'claude-output');
+      
+      expect(claudeOutputListener).toBeDefined();
+      
+      if (claudeOutputListener) {
+        await act(async () => {
+          claudeOutputListener[1](mockEvent);
+        });
+
+        expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+      }
+    });
+
+    it('handles approval request events', async () => {
+      const onChatUpdated = vi.fn();
+      
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Simulate approval request event
+      const mockEvent = {
+        payload: {
+          approval_id: 'approval-1',
+          request: {
+            toolName: 'write_file',
+            input: { path: 'test.txt' },
+            worktreeId: 'test-worktree-1',
+          },
+        },
+      };
+
+      // Get the event listener that was registered
+      const listenCalls = global.mockListen.mock.calls;
+      const approvalListener = listenCalls.find(call => call[0] === 'tool-approval-request');
+      
+      expect(approvalListener).toBeDefined();
+      
+      if (approvalListener) {
+        await act(async () => {
+          approvalListener[1](mockEvent);
+        });
+
+        expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+      }
+    });
+
+    it('handles Claude completion events', async () => {
+      const onChatUpdated = vi.fn();
+      
+      const chatWithProcess: WorktreeChat = {
+        ...defaultChat,
+        process: {
+          id: 'process-1',
+          worktree_id: 'test-worktree-1',
+          status: 'running',
+        },
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithProcess} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Simulate completion event
+      const mockEvent = {
+        payload: {
+          process_id: 'process-1',
+          success: true,
+        },
+      };
+
+      // Get the event listener that was registered
+      const listenCalls = global.mockListen.mock.calls;
+      const completionListener = listenCalls.find(call => call[0] === 'claude-completed');
+      
+      expect(completionListener).toBeDefined();
+      
+      if (completionListener) {
+        await act(async () => {
+          completionListener[1](mockEvent);
+        });
+
+        expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+      }
+    });
+  });
+
+  describe('Copy Chat History', () => {
+    it('copies chat history to clipboard', async () => {
+      const user = userEvent.setup();
+      const chatWithMessages: WorktreeChat = {
+        ...defaultChat,
+        messages: [
+          {
+            id: 'msg-1',
+            worktree_id: 'test-worktree-1',
+            role: 'user',
+            content: 'Hello Claude',
+            timestamp: '2024-01-01T00:00:00Z',
+            status: 'sent',
+          },
+          {
+            id: 'msg-2',
+            worktree_id: 'test-worktree-1',
+            role: 'assistant',
+            content: 'Hello! How can I help?',
+            timestamp: '2024-01-01T00:01:00Z',
+            status: 'sent',
+          },
+        ],
+      };
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} chat={chatWithMessages} />);
+      });
+
+      const copyButton = screen.getByText('Copy Chat');
+      await act(async () => {
+        await user.click(copyButton);
+      });
+
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        expect.stringContaining('Hello Claude')
+      );
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        expect.stringContaining('Hello! How can I help?')
+      );
+    });
+  });
+
+  describe('MCP Server Management', () => {
+    it('initializes MCP server on mount', async () => {
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} />);
+      });
+
+      expect(global.mockInvoke).toHaveBeenCalledWith('create_mcp_server', 'test-worktree-1', '/home/test/feature-branch');
+    });
+
+    it('shows MCP server initialization error', async () => {
+      const onChatUpdated = vi.fn();
+      
+      global.mockInvoke.mockImplementation((command: string) => {
+        if (command === 'create_mcp_server') {
+          return Promise.reject(new Error('MCP server failed to start'));
+        }
+        return Promise.resolve();
+      });
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      await waitFor(() => {
+        expect(onChatUpdated).toHaveBeenCalledWith(expect.any(Function));
+      });
+    });
+
+    it('disables input when MCP server is not ready', async () => {
+      global.mockInvoke.mockImplementation((command: string) => {
+        if (command === 'create_mcp_server') {
+          return Promise.resolve('mcp-server-1');
+        }
+        if (command === 'get_mcp_server_status') {
+          return Promise.resolve(false); // Server not ready
+        }
+        return Promise.resolve();
+      });
+
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} />);
+      });
+
+      await waitFor(() => {
+        const input = screen.getByPlaceholderText('Type your message to Claude...');
+        const sendButton = screen.getByText('Send');
+        
+        expect(input).toBeDisabled();
+        expect(sendButton).toBeDisabled();
+      });
+    });
+  });
+
+  describe('Message Deduplication', () => {
+    it('prevents duplicate Claude output messages', async () => {
+      const onChatUpdated = vi.fn();
+      
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Simulate identical Claude output events
+      const mockEvent = {
+        payload: {
+          process_id: 'process-1',
+          content: 'Duplicate message',
+          timestamp: '2024-01-01T00:00:00Z',
+        },
+      };
+
+      const listenCalls = global.mockListen.mock.calls;
+      const claudeOutputListener = listenCalls.find(call => call[0] === 'claude-output');
+      
+      if (claudeOutputListener) {
+        await act(async () => {
+          // Send the same event twice
+          claudeOutputListener[1](mockEvent);
+          claudeOutputListener[1](mockEvent);
+        });
+
+        // Should only process the message once
+        expect(onChatUpdated).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('prevents duplicate approval requests', async () => {
+      const onChatUpdated = vi.fn();
+      
+      await act(async () => {
+        render(<ChatWindow {...defaultProps} onChatUpdated={onChatUpdated} />);
+      });
+
+      // Simulate identical approval request events
+      const mockEvent = {
+        payload: {
+          approval_id: 'approval-1',
+          request: {
+            toolName: 'write_file',
+            input: { path: 'test.txt' },
+            worktreeId: 'test-worktree-1',
+          },
+        },
+      };
+
+      const listenCalls = global.mockListen.mock.calls;
+      const approvalListener = listenCalls.find(call => call[0] === 'tool-approval-request');
+      
+      if (approvalListener) {
+        await act(async () => {
+          // Send the same event twice
+          approvalListener[1](mockEvent);
+          approvalListener[1](mockEvent);
+        });
+
+        // Should only process the approval once
+        expect(onChatUpdated).toHaveBeenCalledTimes(1);
+      }
+    });
+  });
+});

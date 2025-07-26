@@ -24,10 +24,15 @@ export interface ClaudeProcess {
 export interface ChatMessage {
   id: string;
   worktree_id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'approval' | 'system';
   content: string;
   timestamp: string;
   status?: 'sending' | 'sent' | 'error';
+  approvalRequest?: {
+    approvalId: string;
+    toolName: string;
+    input: any;
+  };
 }
 
 export interface WorktreeChat {
@@ -54,6 +59,28 @@ export interface Repository {
   loadedAt: string;
 }
 
+// MCP Server Types
+export interface McpServerConfig {
+  serverId: string;
+  worktreeId: string;
+  worktreePath: string;
+  serverPath: string;
+  port?: number;
+}
+
+export interface ApprovalRequest {
+  toolName: string;
+  input: any;
+  worktreeId: string;
+  timestamp: number;
+}
+
+export interface ApprovalResponse {
+  behavior: 'allow' | 'deny';
+  message?: string;
+  updatedInput?: any;
+}
+
 export interface AppState {
   repositories: Repository[];
   chats: Record<string, WorktreeChat>;
@@ -61,4 +88,7 @@ export interface AppState {
   // Keep for backwards compatibility during transition
   selectedRepo?: string;
   worktrees: WorktreeConfig[];
+  // MCP server management
+  mcpServers: Record<string, McpServerConfig>;
+  pendingApprovals: Record<string, ApprovalRequest>;
 }

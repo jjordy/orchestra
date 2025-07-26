@@ -1,0 +1,486 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { tauriService } from '../services/tauri';
+
+describe('Tauri Service', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    
+    // Mock successful responses by default
+    global.mockInvoke.mockImplementation((command: string) => {
+      switch (command) {
+        case 'validate_git_repo':
+          return Promise.resolve('Valid git repository');
+        case 'list_git_worktrees':
+          return Promise.resolve([
+            {
+              path: '/home/test/main-repo',
+              branch: 'main',
+              is_main: true,
+              is_bare: false,
+              is_detached: false,
+            },
+            {
+              path: '/home/test/feature-branch',
+              branch: 'feature-branch',
+              is_main: false,
+              is_bare: false,
+              is_detached: false,
+            },
+          ]);
+        case 'create_worktree':
+          return Promise.resolve({
+            id: 'new-worktree-id',
+            name: 'new-feature',
+            path: '/home/test/new-feature',
+            branch: 'new-feature',
+            base_repo: '/home/test/main-repo',
+            is_active: true,
+            created_at: '2024-01-01T00:00:00Z',
+          });
+        case 'start_claude_process':
+          return Promise.resolve({
+            id: 'process-123',
+            worktree_id: 'worktree-1',
+            pid: 12345,
+            status: 'running',
+            task: 'test task',
+            started_at: '2024-01-01T00:00:00Z',
+            last_activity: '2024-01-01T00:00:00Z',
+          });
+        case 'send_message_to_claude':
+          return Promise.resolve();
+        case 'stop_claude_process':
+          return Promise.resolve();
+        case 'list_processes':
+          return Promise.resolve([
+            {
+              id: 'process-123',
+              worktree_id: 'worktree-1',
+              pid: 12345,
+              status: 'running',
+              task: 'test task',
+              started_at: '2024-01-01T00:00:00Z',
+              last_activity: '2024-01-01T00:00:00Z',
+            },
+          ]);
+        case 'create_mcp_server':
+          return Promise.resolve('mcp-server-123');
+        case 'stop_mcp_server':
+          return Promise.resolve();
+        case 'list_mcp_servers':
+          return Promise.resolve([
+            {
+              serverId: 'mcp-server-123',
+              worktreeId: 'worktree-1',
+              worktreePath: '/home/test/worktree',
+              serverPath: '/path/to/server.js',
+              port: 8080,
+            },
+          ]);
+        case 'get_mcp_server_status':
+          return Promise.resolve(true);
+        case 'request_tool_approval':
+          return Promise.resolve('approval-123');
+        case 'respond_to_approval':
+          return Promise.resolve();
+        case 'get_pending_approvals':
+          return Promise.resolve([]);
+        case 'check_worktree_status':
+          return Promise.resolve([false, false]); // no changes, no unpushed
+        case 'remove_worktree':
+          return Promise.resolve();
+        default:
+          return Promise.resolve();
+      }
+    });
+  });
+
+  describe('Git Repository Operations', () => {
+    it('validates git repository', async () => {
+      const result = await tauriService.validateGitRepo('/home/test/repo');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('validate_git_repo', '/home/test/repo');
+      expect(result).toBe('Valid git repository');
+    });
+
+    it('handles invalid repository path', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Not a git repository'))
+      );
+
+      await expect(tauriService.validateGitRepo('/invalid/path')).rejects.toThrow('Not a git repository');
+    });
+
+    it('lists git worktrees', async () => {
+      const worktrees = await tauriService.listGitWorktrees('/home/test/repo');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('list_git_worktrees', '/home/test/repo');
+      expect(worktrees).toHaveLength(2);
+      expect(worktrees[0]).toMatchObject({
+        path: '/home/test/main-repo',
+        branch: 'main',
+        is_main: true,
+      });
+      expect(worktrees[1]).toMatchObject({
+        path: '/home/test/feature-branch',
+        branch: 'feature-branch',
+        is_main: false,
+      });
+    });
+
+    it('creates new worktree', async () => {
+      const worktree = await tauriService.createWorktree(
+        '/home/test/main-repo',
+        'new-feature',
+        'new-feature'
+      );
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'create_worktree',
+        '/home/test/main-repo',
+        'new-feature',
+        'new-feature'
+      );
+      expect(worktree).toMatchObject({
+        name: 'new-feature',
+        branch: 'new-feature',
+        path: '/home/test/new-feature',
+      });
+    });
+
+    it('checks worktree status', async () => {
+      const [hasChanges, hasUnpushed] = await tauriService.checkWorktreeStatus('/home/test/worktree');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('check_worktree_status', '/home/test/worktree');
+      expect(hasChanges).toBe(false);
+      expect(hasUnpushed).toBe(false);
+    });
+
+    it('removes worktree', async () => {
+      await tauriService.removeWorktree('/home/test/worktree', '/home/test/main-repo', false);
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'remove_worktree',
+        '/home/test/worktree',
+        '/home/test/main-repo',
+        false
+      );
+    });
+
+    it('removes worktree with force flag', async () => {
+      await tauriService.removeWorktree('/home/test/worktree', '/home/test/main-repo', true);
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'remove_worktree',
+        '/home/test/worktree',
+        '/home/test/main-repo',
+        true
+      );
+    });
+  });
+
+  describe('Claude Process Management', () => {
+    it('starts Claude process', async () => {
+      const process = await tauriService.startClaudeProcess(
+        '/home/test/worktree',
+        'worktree-1',
+        'Hello Claude',
+        'safe'
+      );
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'start_claude_process',
+        '/home/test/worktree',
+        'worktree-1',
+        'Hello Claude',
+        'safe'
+      );
+      expect(process).toMatchObject({
+        id: 'process-123',
+        worktree_id: 'worktree-1',
+        status: 'running',
+      });
+    });
+
+    it('starts Claude process with different permission modes', async () => {
+      const modes = ['safe', 'full', 'mcp'];
+      
+      for (const mode of modes) {
+        await tauriService.startClaudeProcess(
+          '/home/test/worktree',
+          'worktree-1',
+          'Hello Claude',
+          mode
+        );
+        
+        expect(global.mockInvoke).toHaveBeenCalledWith(
+          'start_claude_process',
+          '/home/test/worktree',
+          'worktree-1',
+          'Hello Claude',
+          mode
+        );
+      }
+    });
+
+    it('sends message to Claude', async () => {
+      await tauriService.sendMessageToClaude(
+        '/home/test/worktree',
+        'worktree-1',
+        'Follow-up message',
+        'safe'
+      );
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'send_message_to_claude',
+        '/home/test/worktree',
+        'worktree-1',
+        'Follow-up message',
+        'safe'
+      );
+    });
+
+    it('stops Claude process', async () => {
+      await tauriService.stopClaudeProcess('process-123');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('stop_claude_process', 'process-123');
+    });
+
+    it('lists Claude processes', async () => {
+      const processes = await tauriService.listProcesses();
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('list_processes');
+      expect(processes).toHaveLength(1);
+      expect(processes[0]).toMatchObject({
+        id: 'process-123',
+        worktree_id: 'worktree-1',
+        status: 'running',
+      });
+    });
+
+    it('handles process start failure', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Failed to start Claude process'))
+      );
+
+      await expect(
+        tauriService.startClaudeProcess('/home/test/worktree', 'worktree-1', 'Hello', 'safe')
+      ).rejects.toThrow('Failed to start Claude process');
+    });
+  });
+
+  describe('MCP Server Management', () => {
+    it('creates MCP server', async () => {
+      const serverId = await tauriService.createMcpServer('worktree-1', '/home/test/worktree');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('create_mcp_server', 'worktree-1', '/home/test/worktree');
+      expect(serverId).toBe('mcp-server-123');
+    });
+
+    it('stops MCP server', async () => {
+      await tauriService.stopMcpServer('mcp-server-123');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('stop_mcp_server', 'mcp-server-123');
+    });
+
+    it('lists MCP servers', async () => {
+      const servers = await tauriService.listMcpServers();
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('list_mcp_servers');
+      expect(servers).toHaveLength(1);
+      expect(servers[0]).toMatchObject({
+        serverId: 'mcp-server-123',
+        worktreeId: 'worktree-1',
+      });
+    });
+
+    it('gets MCP server status', async () => {
+      const status = await tauriService.getMcpServerStatus('mcp-server-123');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('get_mcp_server_status', 'mcp-server-123');
+      expect(status).toBe(true);
+    });
+
+    it('handles MCP server creation failure', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Failed to create MCP server'))
+      );
+
+      await expect(
+        tauriService.createMcpServer('worktree-1', '/home/test/worktree')
+      ).rejects.toThrow('Failed to create MCP server');
+    });
+  });
+
+  describe('Approval System', () => {
+    it('requests tool approval', async () => {
+      const approvalRequest = {
+        toolName: 'write_file',
+        input: { path: 'test.txt', content: 'Hello World' },
+        worktreeId: 'worktree-1',
+        timestamp: Date.now(),
+      };
+
+      const approvalId = await tauriService.requestToolApproval(approvalRequest);
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('request_tool_approval', approvalRequest);
+      expect(approvalId).toBe('approval-123');
+    });
+
+    it('responds to approval with allow', async () => {
+      const response = {
+        behavior: 'allow' as const,
+      };
+
+      await tauriService.respondToApproval('approval-123', response);
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('respond_to_approval', 'approval-123', response);
+    });
+
+    it('responds to approval with deny', async () => {
+      const response = {
+        behavior: 'deny' as const,
+        message: 'User denied permission',
+      };
+
+      await tauriService.respondToApproval('approval-123', response);
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('respond_to_approval', 'approval-123', response);
+    });
+
+    it('gets pending approvals', async () => {
+      const approvals = await tauriService.getPendingApprovals();
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('get_pending_approvals');
+      expect(Array.isArray(approvals)).toBe(true);
+    });
+
+    it('handles approval request failure', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Failed to request approval'))
+      );
+
+      const approvalRequest = {
+        toolName: 'write_file',
+        input: { path: 'test.txt' },
+        worktreeId: 'worktree-1',
+        timestamp: Date.now(),
+      };
+
+      await expect(
+        tauriService.requestToolApproval(approvalRequest)
+      ).rejects.toThrow('Failed to request approval');
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('handles network/communication errors', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Failed to communicate with backend'))
+      );
+
+      await expect(
+        tauriService.validateGitRepo('/home/test/repo')
+      ).rejects.toThrow('Failed to communicate with backend');
+    });
+
+    it('handles invalid parameters', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Invalid parameters'))
+      );
+
+      await expect(
+        tauriService.createWorktree('', '', '')
+      ).rejects.toThrow('Invalid parameters');
+    });
+
+    it('handles permission errors', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        Promise.reject(new Error('Permission denied'))
+      );
+
+      await expect(
+        tauriService.createWorktree('/readonly/path', 'branch', 'name')
+      ).rejects.toThrow('Permission denied');
+    });
+
+    it('handles timeout errors', async () => {
+      global.mockInvoke.mockImplementationOnce(() => 
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Operation timed out')), 100);
+        })
+      );
+
+      await expect(
+        tauriService.startClaudeProcess('/home/test/worktree', 'id', 'message', 'safe')
+      ).rejects.toThrow('Operation timed out');
+    });
+  });
+
+  describe('Parameter Validation', () => {
+    it('validates repository paths', async () => {
+      // The actual validation would happen in the Rust backend
+      // Here we test that the service passes parameters correctly
+      await tauriService.validateGitRepo('/home/test/repo');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith('validate_git_repo', '/home/test/repo');
+    });
+
+    it('validates worktree parameters', async () => {
+      await tauriService.createWorktree('/repo/path', 'branch-name', 'worktree-name');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'create_worktree',
+        '/repo/path',
+        'branch-name',
+        'worktree-name'
+      );
+    });
+
+    it('validates Claude process parameters', async () => {
+      await tauriService.startClaudeProcess('/worktree/path', 'worktree-id', 'message', 'mcp');
+      
+      expect(global.mockInvoke).toHaveBeenCalledWith(
+        'start_claude_process',
+        '/worktree/path',
+        'worktree-id',
+        'message',
+        'mcp'
+      );
+    });
+  });
+
+  describe('Response Data Validation', () => {
+    it('validates worktree response structure', async () => {
+      const worktrees = await tauriService.listGitWorktrees('/home/test/repo');
+      
+      worktrees.forEach(worktree => {
+        expect(worktree).toHaveProperty('path');
+        expect(worktree).toHaveProperty('branch');
+        expect(worktree).toHaveProperty('is_main');
+        expect(worktree).toHaveProperty('is_bare');
+        expect(worktree).toHaveProperty('is_detached');
+      });
+    });
+
+    it('validates Claude process response structure', async () => {
+      const process = await tauriService.startClaudeProcess('/path', 'id', 'message', 'safe');
+      
+      expect(process).toHaveProperty('id');
+      expect(process).toHaveProperty('worktree_id');
+      expect(process).toHaveProperty('status');
+      expect(process).toHaveProperty('started_at');
+    });
+
+    it('validates MCP server response structure', async () => {
+      const servers = await tauriService.listMcpServers();
+      
+      servers.forEach(server => {
+        expect(server).toHaveProperty('serverId');
+        expect(server).toHaveProperty('worktreeId');
+        expect(server).toHaveProperty('worktreePath');
+        expect(server).toHaveProperty('serverPath');
+      });
+    });
+  });
+});

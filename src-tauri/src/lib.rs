@@ -4,14 +4,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::sync::{Arc, Mutex};
-use tauri::{State, AppHandle, Emitter};
+use tauri::{State, AppHandle, Emitter, Manager};
 use uuid::Uuid;
-use std::io::{BufRead, BufReader, Write, Read};
+use std::io::{BufRead, BufReader};
 use std::thread;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use axum::{routing::post, Router};
+use tower_http::cors::CorsLayer;
+
+mod mcp_manager;
+use mcp_manager::{McpManager, ApprovalRequest, ApprovalResponse, HttpAppState};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_extended;
+
+#[cfg(test)]
+mod approval_tests;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorktreeConfig {
@@ -35,7 +45,7 @@ pub struct ClaudeProcess {
     pub last_activity: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProcessOutput {
     pub process_id: String,
     pub content: String,
@@ -64,7 +74,7 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
                         if let Some(content_array) = message.get("content").and_then(|c| c.as_array()) {
                             let mut text_results = Vec::new();
                             
-                            // Collect only text content, skip tool usage indicators
+                            // Collect text content and tool result summaries
                             for item in content_array {
                                 if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
                                     if item_type == "text" {
@@ -73,8 +83,26 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
                                                 text_results.push(text.to_string());
                                             }
                                         }
+                                    } else if item_type == "tool_result" {
+                                        // Include tool results to show what tools accomplished
+                                        if let Some(content) = item.get("content") {
+                                            if let Some(content_array) = content.as_array() {
+                                                for result_item in content_array {
+                                                    if let Some(result_text) = result_item.get("text").and_then(|t| t.as_str()) {
+                                                        if !result_text.trim().is_empty() {
+                                                            // Add a brief prefix to indicate this is a tool result
+                                                            text_results.push(format!("Tool result: {}", result_text.trim()));
+                                                        }
+                                                    }
+                                                }
+                                            } else if let Some(result_text) = content.get("text").and_then(|t| t.as_str()) {
+                                                if !result_text.trim().is_empty() {
+                                                    text_results.push(format!("Tool result: {}", result_text.trim()));
+                                                }
+                                            }
+                                        }
                                     }
-                                    // Skip tool_use items entirely - don't show "Using..." messages
+                                    // Still skip tool_use items to avoid "Using..." messages
                                 }
                             }
                             
@@ -121,13 +149,22 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
     }
 }
 
-#[derive(Default)]
 pub struct AppState {
     pub worktrees: Mutex<HashMap<String, WorktreeConfig>>,
     pub processes: Mutex<HashMap<String, ClaudeProcess>>,
     pub running_processes: Mutex<HashMap<String, Arc<Mutex<Option<Child>>>>>,
-    pub pty_sessions: Mutex<HashMap<String, Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>>>,
-    pub pty_writers: Mutex<HashMap<String, Arc<Mutex<Box<dyn std::io::Write + Send>>>>>,
+    pub mcp_manager: McpManager,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            worktrees: Mutex::new(HashMap::new()),
+            processes: Mutex::new(HashMap::new()),
+            running_processes: Mutex::new(HashMap::new()),
+            mcp_manager: McpManager::new(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -215,9 +252,50 @@ async fn start_claude_process(
         .arg("stream-json");
     
     // Set permission mode based on user preference
+    eprintln!("🔧 Permission mode: {:?}", permission_mode);
     match permission_mode.as_deref().unwrap_or("safe") {
         "full" => {
             cmd.arg("--dangerously-skip-permissions");
+        }
+        "mcp" => {
+            // Connect to our MCP server for this worktree
+            // We need to find the server path for this worktree
+            eprintln!("🔍 Looking for MCP server for worktree: {}", worktree_id);
+            let servers = state.mcp_manager.list_servers().await;
+            eprintln!("🔍 Available MCP servers: {:?}", servers);
+            let server_for_worktree = servers.iter().find(|s| s.worktree_id == worktree_id);
+            
+            if let Some(server_config) = server_for_worktree {
+                // Create MCP config JSON for Claude Code
+                let mcp_config = serde_json::json!({
+                    "mcpServers": {
+                        "orchestra-worktree": {
+                            "command": "node",
+                            "args": [server_config.server_path],
+                            "env": {
+                                "WORKTREE_PATH": worktree_path,
+                                "WORKTREE_ID": worktree_id
+                            }
+                        }
+                    }
+                });
+                
+                // Write config to temporary file
+                let config_file = format!("/tmp/mcp_config_{}.json", worktree_id);
+                if let Err(e) = std::fs::write(&config_file, mcp_config.to_string()) {
+                    eprintln!("Failed to write MCP config: {}", e);
+                    cmd.arg("--permission-mode").arg("acceptEdits");
+                } else {
+                    cmd.arg("--mcp-config").arg(&config_file)
+                        .arg("--permission-prompt-tool")
+                        .arg("mcp__orchestra-worktree__approval_prompt");
+                    eprintln!("🔗 Connecting Claude to MCP server: {} using config: {} with permission tool", 
+                        server_config.server_id, config_file);
+                }
+            } else {
+                eprintln!("⚠️  No MCP server found for worktree {}, falling back to safe mode", worktree_id);
+                cmd.arg("--permission-mode").arg("acceptEdits");
+            }
         }
         _ => {
             cmd.arg("--permission-mode").arg("acceptEdits");
@@ -227,6 +305,7 @@ async fn start_claude_process(
     let child = cmd
         .arg(&user_message)
         .current_dir(&worktree_path)
+        .env("APPROVAL_ENDPOINT", "http://localhost:8080/api/approval-request")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -434,7 +513,7 @@ async fn list_processes(state: State<'_, AppState>) -> Result<Vec<ClaudeProcess>
     Ok(processes.values().cloned().collect())
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GitWorktreeInfo {
     pub path: String,
     pub branch: String,
@@ -715,249 +794,66 @@ async fn remove_worktree(
     Ok(())
 }
 
-// PTY Terminal Commands
+// MCP Server Commands
 
 #[tauri::command]
-async fn create_worktree_pty(
+async fn create_mcp_server(
     app_handle: AppHandle,
     state: State<'_, AppState>,
-    pty_id: String,
-    working_dir: String,
+    worktree_id: String,
+    worktree_path: String,
 ) -> Result<String, String> {
-    let pty_system = native_pty_system();
-    
-    // Check if PTY with this ID already exists
-    {
-        let sessions = state.pty_sessions.lock().unwrap();
-        if sessions.contains_key(&pty_id) {
-            eprintln!("PTY {}: Already exists, reusing existing session", pty_id);
-            // Return a special indicator that this is an existing session
-            return Ok(format!("existing:{}", pty_id));
-        }
-    }
-    
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("Failed to create PTY: {}", e))?;
-
-    // Get the default shell - cross-platform
-    let shell = if cfg!(target_os = "windows") {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    };
-    
-    let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(working_dir.clone());
-    let child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn shell: {}", e))?;
-
-    // Store the child process
-    let child_arc = Arc::new(Mutex::new(Some(child)));
-    state
-        .pty_sessions
-        .lock()
-        .unwrap()
-        .insert(pty_id.clone(), child_arc);
-
-    // Get a writer from the master PTY
-    let writer = pty_pair.master.take_writer().map_err(|e| format!("Failed to get writer: {}", e))?;
-    let writer_arc: Arc<Mutex<Box<dyn std::io::Write + Send>>> = Arc::new(Mutex::new(writer));
-    
-    // Store the writer for later use
-    state
-        .pty_writers
-        .lock()
-        .unwrap()
-        .insert(pty_id.clone(), writer_arc.clone());
-
-    // Shell starts in the correct working directory via CommandBuilder::cwd()
-    eprintln!("PTY {}: Created shell in working directory: {}", pty_id, working_dir);
-
-    // Handle PTY output in a separate thread
-    let pty_id_clone = pty_id.clone();
-    let app_handle_clone = app_handle.clone();
-    let mut reader = pty_pair.master.try_clone_reader().map_err(|e| format!("Failed to clone reader: {}", e))?;
-    
-    thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    eprintln!("PTY {}: EOF reached", pty_id_clone);
-                    break;
-                }
-                Ok(n) => {
-                    let output = String::from_utf8_lossy(&buffer[..n]).to_string();
-                    let _ = app_handle_clone.emit(&format!("pty-output-{}", pty_id_clone), output);
-                }
-                Err(e) => {
-                    eprintln!("PTY {}: Read error: {}", pty_id_clone, e);
-                    break;
-                }
-            }
-        }
-        
-        // Signal that PTY is closed - cleanup will be handled by close_pty command
-        let _ = app_handle_clone.emit(&format!("pty-closed-{}", pty_id_clone), ());
-    });
-
-    eprintln!("PTY {}: Created for worktree at {}", pty_id, working_dir);
-    Ok(pty_id)
+    state.mcp_manager.create_server(worktree_id, worktree_path, app_handle).await
 }
 
 #[tauri::command]
-async fn create_pty(
-    app_handle: AppHandle,
+async fn stop_mcp_server(
     state: State<'_, AppState>,
-    working_dir: String,
+    server_id: String,
+) -> Result<(), String> {
+    state.mcp_manager.stop_server(&server_id).await
+}
+
+#[tauri::command]
+async fn list_mcp_servers(
+    state: State<'_, AppState>,
+) -> Result<Vec<mcp_manager::McpServerConfig>, String> {
+    Ok(state.mcp_manager.list_servers().await)
+}
+
+#[tauri::command]
+async fn get_mcp_server_status(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<bool, String> {
+    state.mcp_manager.get_server_status(&server_id).await
+        .ok_or_else(|| "Server not found".to_string())
+}
+
+#[tauri::command]
+async fn request_tool_approval(
+    state: State<'_, AppState>,
+    request: ApprovalRequest,
 ) -> Result<String, String> {
-    let pty_system = native_pty_system();
-    let pty_id = Uuid::new_v4().to_string();
-    
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("Failed to create PTY: {}", e))?;
-
-    // Get the default shell - cross-platform
-    let shell = if cfg!(target_os = "windows") {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    };
-    
-    let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(working_dir.clone());
-    let child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn shell: {}", e))?;
-
-    // Store the child process
-    let child_arc = Arc::new(Mutex::new(Some(child)));
-    state
-        .pty_sessions
-        .lock()
-        .unwrap()
-        .insert(pty_id.clone(), child_arc);
-
-    // Get a writer from the master PTY
-    let writer = pty_pair.master.take_writer().map_err(|e| format!("Failed to get writer: {}", e))?;
-    let writer_arc: Arc<Mutex<Box<dyn std::io::Write + Send>>> = Arc::new(Mutex::new(writer));
-    
-    // Store the writer for later use
-    state
-        .pty_writers
-        .lock()
-        .unwrap()
-        .insert(pty_id.clone(), writer_arc.clone());
-
-    // Shell starts in the correct working directory via CommandBuilder::cwd()
-    eprintln!("PTY {}: Created shell in working directory: {}", pty_id, working_dir);
-
-    // Handle PTY output in a separate thread
-    let pty_id_clone = pty_id.clone();
-    let app_handle_clone = app_handle.clone();
-    let mut reader = pty_pair.master.try_clone_reader().map_err(|e| format!("Failed to clone reader: {}", e))?;
-    
-    thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    eprintln!("PTY {}: EOF reached", pty_id_clone);
-                    break;
-                }
-                Ok(n) => {
-                    let output = String::from_utf8_lossy(&buffer[..n]).to_string();
-                    let _ = app_handle_clone.emit(&format!("pty-output-{}", pty_id_clone), output);
-                }
-                Err(e) => {
-                    eprintln!("PTY {}: Read error: {}", pty_id_clone, e);
-                    break;
-                }
-            }
-        }
-        
-        // Signal that PTY is closed - cleanup will be handled by close_pty command
-        let _ = app_handle_clone.emit(&format!("pty-closed-{}", pty_id_clone), ());
-    });
-
-    Ok(pty_id)
-}
-
-#[tauri::command] 
-async fn write_to_pty(
-    state: State<'_, AppState>,
-    pty_id: String,
-    data: String,
-) -> Result<(), String> {
-    eprintln!("PTY {}: Writing data: {:?}", pty_id, data);
-    let writers = state.pty_writers.lock().unwrap();
-    
-    if let Some(writer_arc) = writers.get(&pty_id) {
-        let mut writer = writer_arc.lock().unwrap();
-        writer.write_all(data.as_bytes())
-            .map_err(|e| format!("Failed to write to PTY: {}", e))?;
-        writer.flush()
-            .map_err(|e| format!("Failed to flush PTY: {}", e))?;
-        eprintln!("PTY {}: Write successful", pty_id);
-        Ok(())
-    } else {
-        eprintln!("PTY {}: Session not found", pty_id);
-        Err(format!("PTY session {} not found", pty_id))
-    }
+    state.mcp_manager.request_approval(request).await
 }
 
 #[tauri::command]
-async fn resize_pty(
-    _state: State<'_, AppState>,
-    _pty_id: String,
-    _cols: u16,
-    _rows: u16,
+async fn respond_to_approval(
+    state: State<'_, AppState>,
+    approval_id: String,
+    response: ApprovalResponse,
 ) -> Result<(), String> {
-    // Note: Resize functionality would require storing the master PTY
-    // For now, we'll skip resize functionality to keep the implementation simple
-    Ok(())
+    state.mcp_manager.respond_to_approval(approval_id, response).await
 }
 
 #[tauri::command]
-async fn close_pty(
+async fn get_pending_approvals(
     state: State<'_, AppState>,
-    pty_id: String,
-) -> Result<(), String> {
-    // Clean up child process
-    {
-        let mut sessions = state.pty_sessions.lock().unwrap();
-        if let Some(child_arc) = sessions.remove(&pty_id) {
-            if let Ok(mut child_guard) = child_arc.lock() {
-                if let Some(mut child) = child_guard.take() {
-                    let _ = child.kill();
-                }
-            }
-        }
-    }
-    
-    // Clean up writer
-    {
-        let mut writers = state.pty_writers.lock().unwrap();
-        writers.remove(&pty_id);
-    }
-    
-    Ok(())
+) -> Result<Vec<(String, ApprovalRequest)>, String> {
+    Ok(state.mcp_manager.get_pending_approvals().await)
 }
+
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -965,6 +861,43 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            
+            // Clone data we need from state before spawning
+            let pending_http_approvals = {
+                let state = app.state::<AppState>();
+                state.mcp_manager.pending_http_approvals.clone()
+            };
+            
+            tauri::async_runtime::spawn(async move {
+                // Create a new state that includes the app handle
+                let app_state = HttpAppState {
+                    pending_http_approvals,
+                    app_handle: Some(app_handle),
+                };
+                
+                // Start HTTP server
+                let app = Router::new()
+                    .route("/api/approval-request", post(crate::mcp_manager::handle_approval_request))
+                    .layer(CorsLayer::permissive())
+                    .with_state(app_state);
+
+                eprintln!("🌐 RUST: Starting HTTP server on http://localhost:8080");
+                
+                let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+                    .await
+                    .expect("Failed to bind to port 8080");
+                
+                eprintln!("🟢 RUST: HTTP server listening on http://localhost:8080");
+                
+                axum::serve(listener, app)
+                    .await
+                    .expect("HTTP server failed");
+            });
+            
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             create_worktree,
             list_worktrees,
@@ -976,11 +909,14 @@ pub fn run() {
             list_processes,
             check_worktree_status,
             remove_worktree,
-            create_pty,
-            create_worktree_pty,
-            write_to_pty,
-            resize_pty,
-            close_pty
+            // MCP Server commands
+            create_mcp_server,
+            stop_mcp_server,
+            list_mcp_servers,
+            get_mcp_server_status,
+            request_tool_approval,
+            respond_to_approval,
+            get_pending_approvals
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

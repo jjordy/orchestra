@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { WorktreeConfig, WorktreeChat, AppState, GitWorktreeInfo, Repository } from "./types";
+import { WorktreeConfig, WorktreeChat, AppState, Repository } from "./types";
 import { tauriService } from "./services/tauri";
 import RepoSelector from "./components/RepoSelector";
 import RepositoryTree from "./components/RepositoryTree";
@@ -16,6 +16,8 @@ function App() {
     chats: {},
     selectedWorktree: undefined,
     selectedRepo: undefined, // Keep for backwards compatibility
+    mcpServers: {},
+    pendingApprovals: {},
   });
 
   const [windowControls, setWindowControls] = useState({
@@ -46,20 +48,21 @@ function App() {
       if (savedRepos) {
         try {
           const repoPaths: string[] = JSON.parse(savedRepos);
-          // Remove duplicates
-          const uniquePaths = [...new Set(repoPaths)];
+          // Normalize and remove duplicates
+          const normalizedPaths = repoPaths.map(path => path.replace(/\/+$/, ''));
+          const uniquePaths = [...new Set(normalizedPaths)];
           
           // Load repositories sequentially to avoid duplicates
-          for (const repoPath of uniquePaths) {
+          for (const normalizedPath of uniquePaths) {
             try {
-              await addRepository(repoPath, false); // Don't save while loading
+              await addRepository(normalizedPath, false); // Don't save while loading
             } catch (error) {
-              console.error(`Failed to load repository ${repoPath}:`, error);
+              console.error(`Failed to load repository ${normalizedPath}:`, error);
             }
           }
           
-          // Update localStorage with deduplicated list
-          if (uniquePaths.length !== repoPaths.length) {
+          // Update localStorage with normalized and deduplicated list
+          if (uniquePaths.length !== repoPaths.length || uniquePaths.some((path, i) => path !== repoPaths[i])) {
             localStorage.setItem(REPOSITORIES_KEY, JSON.stringify(uniquePaths));
           }
         } catch (error) {
@@ -83,7 +86,9 @@ function App() {
 
   const refreshRepository = async (repoPath: string) => {
     try {
-      const gitWorktrees = await tauriService.listGitWorktrees(repoPath);
+      // Normalize the path
+      const normalizedPath = repoPath.replace(/\/+$/, '');
+      const gitWorktrees = await tauriService.listGitWorktrees(normalizedPath);
       
       // Sort to put main repo first
       const sortedWorktrees = gitWorktrees.sort((a, b) => {
@@ -92,9 +97,9 @@ function App() {
         return 0;
       });
 
-      const repoName = repoPath.split('/').pop() || 'Repository';
-      // Use base64 encoding of path to ensure unique and consistent ID
-      const repoId = `repo-${btoa(repoPath).replace(/[^a-zA-Z0-9]/g, '')}`;
+      const repoName = normalizedPath.split('/').pop() || 'Repository';
+      // Use base64 encoding of normalized path to ensure unique and consistent ID
+      const repoId = `repo-${btoa(normalizedPath).replace(/[^a-zA-Z0-9]/g, '')}`;
       const mainBranch = sortedWorktrees.find(wt => wt.is_main)?.branch || 'main';
 
       const worktrees: WorktreeConfig[] = sortedWorktrees.map((gitWt, index) => {
@@ -107,7 +112,7 @@ function App() {
           name: displayName,
           path: gitWt.path,
           branch: gitWt.branch,
-          base_repo: repoPath,
+          base_repo: normalizedPath,
           is_active: true,
           created_at: new Date().toISOString(),
           is_main: gitWt.is_main,
@@ -117,7 +122,9 @@ function App() {
       });
 
       setAppState(prev => {
-        const existingRepoIndex = prev.repositories.findIndex(repo => repo.path === repoPath);
+        const existingRepoIndex = prev.repositories.findIndex(repo => 
+          repo.path === normalizedPath || repo.path === repoPath
+        );
         if (existingRepoIndex !== -1) {
           // Update existing repository
           const updatedRepositories = [...prev.repositories];
@@ -131,7 +138,7 @@ function App() {
             ...prev,
             repositories: updatedRepositories,
             worktrees: [
-              ...prev.worktrees.filter(wt => wt.base_repo !== repoPath),
+              ...prev.worktrees.filter(wt => wt.base_repo !== normalizedPath && wt.base_repo !== repoPath),
               ...worktrees
             ],
           };
@@ -146,29 +153,31 @@ function App() {
 
   const addRepository = async (repoPath: string, shouldSave: boolean = true) => {
     try {
-      // Use a ref to check current state to avoid stale closure issues
-      const currentState = await new Promise<AppState>(resolve => {
-        setAppState(prev => {
-          resolve(prev);
-          return prev;
-        });
-      });
+      // Normalize the path to avoid duplicate entries due to path variations
+      const normalizedPath = repoPath.replace(/\/+$/, ''); // Remove trailing slashes
       
-      // Check if repository already exists
-      const existingRepo = currentState.repositories.find(repo => repo.path === repoPath);
+      // Check if repository already exists using the current state synchronously
+      const currentRepositories = appState.repositories;
+      const existingRepo = currentRepositories.find(repo => 
+        repo.path === normalizedPath || repo.path === repoPath
+      );
+      
       if (existingRepo) {
+        console.log('Repository already exists, refreshing:', normalizedPath);
         // Refresh the existing repository and expand it
-        await refreshRepository(repoPath);
+        await refreshRepository(normalizedPath);
         setAppState(prev => ({
           ...prev,
           repositories: prev.repositories.map(repo =>
-            repo.path === repoPath ? { ...repo, isExpanded: true } : { ...repo, isExpanded: false }
+            (repo.path === normalizedPath || repo.path === repoPath) 
+              ? { ...repo, isExpanded: true } 
+              : { ...repo, isExpanded: false }
           ),
         }));
         return;
       }
 
-      const gitWorktrees = await tauriService.listGitWorktrees(repoPath);
+      const gitWorktrees = await tauriService.listGitWorktrees(normalizedPath);
       
       // Sort to put main repo first
       const sortedWorktrees = gitWorktrees.sort((a, b) => {
@@ -177,9 +186,9 @@ function App() {
         return 0;
       });
 
-      const repoName = repoPath.split('/').pop() || 'Repository';
-      // Use base64 encoding of path to ensure unique and consistent ID
-      const repoId = `repo-${btoa(repoPath).replace(/[^a-zA-Z0-9]/g, '')}`;
+      const repoName = normalizedPath.split('/').pop() || 'Repository';
+      // Use base64 encoding of normalized path to ensure unique and consistent ID
+      const repoId = `repo-${btoa(normalizedPath).replace(/[^a-zA-Z0-9]/g, '')}`;
       const mainBranch = sortedWorktrees.find(wt => wt.is_main)?.branch || 'main';
 
       const worktrees: WorktreeConfig[] = sortedWorktrees.map((gitWt, index) => {
@@ -192,7 +201,7 @@ function App() {
           name: displayName,
           path: gitWt.path,
           branch: gitWt.branch,
-          base_repo: repoPath,
+          base_repo: normalizedPath,
           is_active: true,
           created_at: new Date().toISOString(),
           is_main: gitWt.is_main,
@@ -204,7 +213,7 @@ function App() {
       const newRepository: Repository = {
         id: repoId,
         name: repoName,
-        path: repoPath,
+        path: normalizedPath,
         isExpanded: true,
         worktrees,
         mainBranch,
@@ -212,9 +221,19 @@ function App() {
       };
 
       // Save to localStorage
-      localStorage.setItem(LAST_REPO_KEY, repoPath);
+      localStorage.setItem(LAST_REPO_KEY, normalizedPath);
 
       setAppState(prev => {
+        // Double-check for duplicates before adding
+        const existingRepoCheck = prev.repositories.find(repo => 
+          repo.path === normalizedPath || repo.id === repoId
+        );
+        
+        if (existingRepoCheck) {
+          console.log('Repository already exists in state, skipping add:', normalizedPath);
+          return prev;
+        }
+        
         const newRepositories = [
           ...prev.repositories.map(repo => ({ ...repo, isExpanded: false })), // Collapse others
           newRepository
@@ -229,7 +248,7 @@ function App() {
           ...prev,
           repositories: newRepositories,
           // Keep backwards compatibility
-          selectedRepo: repoPath,
+          selectedRepo: normalizedPath,
           worktrees: [...prev.worktrees, ...worktrees],
           selectedWorktree: worktrees.find(wt => !wt.is_main)?.id,
         };
@@ -299,20 +318,29 @@ function App() {
     });
   };
 
-  const updateChat = (worktreeId: string, chat: WorktreeChat) => {
+  const updateChat = (worktreeId: string, chatOrUpdater: WorktreeChat | ((chat: WorktreeChat) => WorktreeChat)) => {
     console.log('APP: updateChat called for worktree:', worktreeId);
-    console.log('APP: New chat object:', chat);
-    console.log('APP: New messages count:', chat.messages.length);
     
     setAppState(prev => {
-      const currentChat = prev.chats[worktreeId];
-      console.log('APP: Current chat:', currentChat);
-      console.log('APP: Current messages count:', currentChat?.messages.length || 0);
+      const currentChat = prev.chats[worktreeId] || {
+        worktree_id: worktreeId,
+        messages: [],
+      };
+      
+      // Handle both direct chat objects and updater functions
+      let newChat: WorktreeChat;
+      if (typeof chatOrUpdater === 'function') {
+        newChat = chatOrUpdater(currentChat);
+        console.log('APP: Applied updater function, new messages count:', newChat.messages.length);
+      } else {
+        newChat = chatOrUpdater;
+        console.log('APP: Direct chat update, new messages count:', newChat.messages.length);
+      }
       
       // Only update if the chat has actually changed to prevent unnecessary re-renders
       if (currentChat && 
-          currentChat.messages.length === chat.messages.length &&
-          currentChat.process?.status === chat.process?.status) {
+          currentChat.messages.length === newChat.messages.length &&
+          currentChat.process?.status === newChat.process?.status) {
         console.log('APP: No change detected, keeping previous state');
         return prev; // No change needed
       }
@@ -322,10 +350,9 @@ function App() {
         ...prev,
         chats: {
           ...prev.chats,
-          [worktreeId]: chat,
+          [worktreeId]: newChat,
         }
       };
-      console.log('APP: New state chats:', newState.chats[worktreeId]);
       return newState;
     });
   };
@@ -425,7 +452,7 @@ function App() {
           onCreateWorktree={createWorktree}
         />
         
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
           {selectedWorktree && selectedChat ? (
             <ChatWindow
               worktree={selectedWorktree}
