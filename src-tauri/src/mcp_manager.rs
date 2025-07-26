@@ -1,18 +1,12 @@
+use axum::{extract::State, http::StatusCode, response::Json, routing::post, Router};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use tokio::sync::{Mutex, oneshot};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use tauri::{AppHandle, Emitter};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::post,
-    Router,
-};
+use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -75,7 +69,10 @@ pub async fn handle_approval_request(
     State(state): State<HttpAppState>,
     Json(request): Json<HttpApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    eprintln!("🔵 RUST HTTP: Received approval request for tool: {}", request.tool_name);
+    eprintln!(
+        "🔵 RUST HTTP: Received approval request for tool: {}",
+        request.tool_name
+    );
     eprintln!("🔵 RUST HTTP: Request ID: {}", request.request_id);
     eprintln!("🔵 RUST HTTP: Worktree ID: {}", request.worktree_id);
 
@@ -85,11 +82,17 @@ pub async fn handle_approval_request(
     // Store the pending approval
     {
         let mut pending = state.pending_http_approvals.lock().await;
-        pending.insert(request.request_id.clone(), PendingHttpApproval {
-            request: request.clone(),
-            response_tx,
-        });
-        eprintln!("🔵 RUST HTTP: Stored pending approval, total count: {}", pending.len());
+        pending.insert(
+            request.request_id.clone(),
+            PendingHttpApproval {
+                request: request.clone(),
+                response_tx,
+            },
+        );
+        eprintln!(
+            "🔵 RUST HTTP: Stored pending approval, total count: {}",
+            pending.len()
+        );
     }
 
     // Emit event to UI for approval dialog
@@ -111,29 +114,32 @@ pub async fn handle_approval_request(
     // Wait for user response (this blocks the HTTP request until user responds)
     match response_rx.await {
         Ok(response) => {
-            eprintln!("✅ RUST HTTP: User responded with: {:?}", response);
-            
+            eprintln!("✅ RUST HTTP: User responded with: {response:?}");
+
             // Serialize the response to check what we're sending
             let _json_response = match serde_json::to_string(&response) {
                 Ok(json_str) => {
-                    eprintln!("📤 RUST HTTP: Sending JSON response: {}", json_str);
+                    eprintln!("📤 RUST HTTP: Sending JSON response: {json_str}");
                     json_str
                 }
                 Err(e) => {
-                    eprintln!("❌ RUST HTTP: Failed to serialize response: {}", e);
+                    eprintln!("❌ RUST HTTP: Failed to serialize response: {e}");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
             };
-            
+
             eprintln!("🔵 RUST HTTP: About to return HTTP 200 response");
-            
+
             // Convert behavior back to lowercase for MCP protocol compliance
             let mcp_behavior = match response.behavior {
                 ApprovalBehavior::Allow => "allow",
                 ApprovalBehavior::Deny => "deny",
             };
-            
-            eprintln!("🔵 RUST HTTP: Converting behavior '{:?}' to MCP format '{}'", response.behavior, mcp_behavior);
+
+            eprintln!(
+                "🔵 RUST HTTP: Converting behavior '{:?}' to MCP format '{}'",
+                response.behavior, mcp_behavior
+            );
             Ok(Json(serde_json::json!({
                 "behavior": mcp_behavior,
                 "message": response.message,
@@ -177,20 +183,22 @@ impl McpServer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()
-            .map_err(|e| {
-                eprintln!("Failed to spawn MCP server process: {}", e);
-                format!("Failed to start MCP server: {}", e)
-            })?;
+        let mut child = cmd.spawn().map_err(|e| {
+            eprintln!("Failed to spawn MCP server process: {e}");
+            format!("Failed to start MCP server: {e}")
+        })?;
 
         eprintln!("MCP server started successfully with PID: {:?}", child.id());
 
         // Emit a test event to verify event system is working
-        let _ = app_handle.emit("mcp-debug", serde_json::json!({
-            "message": "MCP server started",
-            "server_id": self.config.server_id,
-            "pid": child.id()
-        }));
+        let _ = app_handle.emit(
+            "mcp-debug",
+            serde_json::json!({
+                "message": "MCP server started",
+                "server_id": self.config.server_id,
+                "pid": child.id()
+            }),
+        );
 
         // Capture stderr for debugging MCP server logs (not for approval processing)
         if let Some(stderr) = child.stderr.take() {
@@ -199,20 +207,23 @@ impl McpServer {
                 use std::io::{BufRead, BufReader};
                 let reader = BufReader::new(stderr);
                 eprintln!("🔥 MCP: Starting stderr monitoring for debug logs");
-                
+
                 for line in reader.lines() {
                     match line {
                         Ok(line) => {
-                            eprintln!("📝 MCP STDERR: {}", line);
-                            
+                            eprintln!("📝 MCP STDERR: {line}");
+
                             // Emit as debug event
-                            let _ = app_handle_clone.emit("mcp-debug", serde_json::json!({
-                                "type": "stderr",
-                                "line": line
-                            }));
+                            let _ = app_handle_clone.emit(
+                                "mcp-debug",
+                                serde_json::json!({
+                                    "type": "stderr",
+                                    "line": line
+                                }),
+                            );
                         }
                         Err(e) => {
-                            eprintln!("❌ MCP: Error reading stderr: {}", e);
+                            eprintln!("❌ MCP: Error reading stderr: {e}");
                             break;
                         }
                     }
@@ -227,11 +238,13 @@ impl McpServer {
 
     pub fn stop(&mut self) -> Result<(), String> {
         if let Some(mut process) = self.process.take() {
-            process.kill()
-                .map_err(|e| format!("Failed to kill MCP server: {}", e))?;
-            
-            process.wait()
-                .map_err(|e| format!("Failed to wait for MCP server: {}", e))?;
+            process
+                .kill()
+                .map_err(|e| format!("Failed to kill MCP server: {e}"))?;
+
+            process
+                .wait()
+                .map_err(|e| format!("Failed to wait for MCP server: {e}"))?;
         }
         Ok(())
     }
@@ -241,24 +254,36 @@ impl McpServer {
             match process.try_wait() {
                 Ok(Some(status)) => {
                     // Process has exited
-                    eprintln!("MCP server process {} has exited with status: {:?}", self.config.server_id, status);
+                    eprintln!(
+                        "MCP server process {} has exited with status: {:?}",
+                        self.config.server_id, status
+                    );
                     self.process = None;
                     false
                 }
                 Ok(None) => {
                     // Process is still running
-                    eprintln!("MCP server process {} is still running", self.config.server_id);
+                    eprintln!(
+                        "MCP server process {} is still running",
+                        self.config.server_id
+                    );
                     true
                 }
                 Err(e) => {
                     // Error checking process status
-                    eprintln!("Error checking MCP server process {} status: {}", self.config.server_id, e);
+                    eprintln!(
+                        "Error checking MCP server process {} status: {}",
+                        self.config.server_id, e
+                    );
                     self.process = None;
                     false
                 }
             }
         } else {
-            eprintln!("MCP server process {} has no process handle", self.config.server_id);
+            eprintln!(
+                "MCP server process {} has no process handle",
+                self.config.server_id
+            );
             false
         }
     }
@@ -299,14 +324,14 @@ impl McpManager {
             .with_state(app_state);
 
         eprintln!("🌐 RUST: Starting HTTP server on http://localhost:8080");
-        
+
         tokio::spawn(async move {
             let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
                 .await
                 .expect("Failed to bind to port 8080");
-            
+
             eprintln!("🟢 RUST: HTTP server listening on http://localhost:8080");
-            
+
             axum::serve(listener, app)
                 .await
                 .expect("HTTP server failed");
@@ -315,10 +340,15 @@ impl McpManager {
         Ok(())
     }
 
-    pub async fn create_server(&self, worktree_id: String, worktree_path: String, app_handle: AppHandle) -> Result<String, String> {
+    pub async fn create_server(
+        &self,
+        worktree_id: String,
+        worktree_path: String,
+        app_handle: AppHandle,
+    ) -> Result<String, String> {
         let server_id = Uuid::new_v4().to_string();
         let server_path = self.get_mcp_server_path()?;
-        
+
         let config = McpServerConfig {
             server_id: server_id.clone(),
             worktree_id: worktree_id.clone(),
@@ -338,19 +368,22 @@ impl McpManager {
 
     pub async fn stop_server(&self, server_id: &str) -> Result<(), String> {
         let mut servers = self.servers.lock().await;
-        
+
         if let Some(server) = servers.get_mut(server_id) {
             server.stop()?;
             servers.remove(server_id);
             Ok(())
         } else {
-            Err(format!("MCP server not found: {}", server_id))
+            Err(format!("MCP server not found: {server_id}"))
         }
     }
 
     pub async fn list_servers(&self) -> Vec<McpServerConfig> {
         let servers = self.servers.lock().await;
-        servers.values().map(|server| server.config.clone()).collect()
+        servers
+            .values()
+            .map(|server| server.config.clone())
+            .collect()
     }
 
     pub async fn get_server_status(&self, server_id: &str) -> Option<bool> {
@@ -360,44 +393,55 @@ impl McpManager {
 
     pub async fn request_approval(&self, request: ApprovalRequest) -> Result<String, String> {
         let approval_id = Uuid::new_v4().to_string();
-        
+
         let mut pending = self.pending_approvals.lock().await;
         pending.insert(approval_id.clone(), request);
-        
+
         Ok(approval_id)
     }
 
-    pub async fn respond_to_approval(&self, approval_id: String, response: ApprovalResponse) -> Result<(), String> {
-        eprintln!("🔵 RUST: respond_to_approval called for ID: {}", approval_id);
-        
+    pub async fn respond_to_approval(
+        &self,
+        approval_id: String,
+        response: ApprovalResponse,
+    ) -> Result<(), String> {
+        eprintln!("🔵 RUST: respond_to_approval called for ID: {approval_id}");
+
         // Try HTTP approval first (new system)
-        if let Ok(()) = self.respond_to_http_approval(approval_id.clone(), response.clone()).await {
+        if let Ok(()) = self
+            .respond_to_http_approval(approval_id.clone(), response.clone())
+            .await
+        {
             return Ok(());
         }
-        
+
         // Fallback to legacy system for tests and backward compatibility
-        eprintln!("🔴 RUST: HTTP approval not found, trying legacy system for ID: {}", approval_id);
+        eprintln!("🔴 RUST: HTTP approval not found, trying legacy system for ID: {approval_id}");
         let mut pending = self.pending_approvals.lock().await;
-        
+
         if let Some(_approval_request) = pending.remove(&approval_id) {
-            eprintln!("🟢 RUST: Found pending approval in legacy system for ID: {}", approval_id);
-            eprintln!("🔵 RUST: Legacy response: {:?}", response);
+            eprintln!("🟢 RUST: Found pending approval in legacy system for ID: {approval_id}");
+            eprintln!("🔵 RUST: Legacy response: {response:?}");
             Ok(())
         } else {
-            eprintln!("🔴 RUST: Approval request not found in either system for ID: {}", approval_id);
-            Err(format!("Approval request not found: {}", approval_id))
+            eprintln!("🔴 RUST: Approval request not found in either system for ID: {approval_id}");
+            Err(format!("Approval request not found: {approval_id}"))
         }
     }
 
-    pub async fn respond_to_http_approval(&self, approval_id: String, response: ApprovalResponse) -> Result<(), String> {
-        eprintln!("🔵 RUST HTTP: respond_to_http_approval called for ID: {}", approval_id);
-        
+    pub async fn respond_to_http_approval(
+        &self,
+        approval_id: String,
+        response: ApprovalResponse,
+    ) -> Result<(), String> {
+        eprintln!("🔵 RUST HTTP: respond_to_http_approval called for ID: {approval_id}");
+
         let mut pending = self.pending_http_approvals.lock().await;
-        
+
         if let Some(pending_approval) = pending.remove(&approval_id) {
-            eprintln!("🟢 RUST HTTP: Found pending HTTP approval for ID: {}", approval_id);
-            eprintln!("🔵 RUST HTTP: Response: {:?}", response);
-            
+            eprintln!("🟢 RUST HTTP: Found pending HTTP approval for ID: {approval_id}");
+            eprintln!("🔵 RUST HTTP: Response: {response:?}");
+
             // Send response through oneshot channel (this unblocks the HTTP request)
             match pending_approval.response_tx.send(response) {
                 Ok(()) => {
@@ -410,28 +454,43 @@ impl McpManager {
                 }
             }
         } else {
-            eprintln!("🔴 RUST HTTP: HTTP approval request not found for ID: {}", approval_id);
-            eprintln!("🔴 RUST HTTP: Available HTTP approval IDs: {:?}", pending.keys().collect::<Vec<_>>());
-            Err(format!("HTTP approval request not found: {}", approval_id))
+            eprintln!("🔴 RUST HTTP: HTTP approval request not found for ID: {approval_id}");
+            eprintln!(
+                "🔴 RUST HTTP: Available HTTP approval IDs: {:?}",
+                pending.keys().collect::<Vec<_>>()
+            );
+            Err(format!("HTTP approval request not found: {approval_id}"))
         }
     }
 
     pub async fn get_pending_approvals(&self) -> Vec<(String, ApprovalRequest)> {
         let pending = self.pending_approvals.lock().await;
-        pending.iter().map(|(id, req)| (id.clone(), req.clone())).collect()
+        pending
+            .iter()
+            .map(|(id, req)| (id.clone(), req.clone()))
+            .collect()
     }
 
     fn get_mcp_server_path(&self) -> Result<String, String> {
         // Try multiple possible paths for the MCP server
-        let current_dir = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
-            
+        let current_dir =
+            std::env::current_dir().map_err(|e| format!("Failed to get current directory: {e}"))?;
+
         let possible_paths = vec![
             current_dir.join("mcp-server").join("dist").join("index.js"),
-            current_dir.join("..").join("mcp-server").join("dist").join("index.js"),
-            current_dir.parent().unwrap_or(&current_dir).join("mcp-server").join("dist").join("index.js"),
+            current_dir
+                .join("..")
+                .join("mcp-server")
+                .join("dist")
+                .join("index.js"),
+            current_dir
+                .parent()
+                .unwrap_or(&current_dir)
+                .join("mcp-server")
+                .join("dist")
+                .join("index.js"),
         ];
-        
+
         for path in &possible_paths {
             eprintln!("Checking MCP server path: {}", path.display());
             if path.exists() {
@@ -439,7 +498,7 @@ impl McpManager {
                 return Ok(path.to_string_lossy().to_string());
             }
         }
-        
+
         Err(format!(
             "MCP server not found. Tried paths: {:?}\nRun 'npm run build' in the mcp-server directory.",
             possible_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()

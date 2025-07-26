@@ -1,18 +1,17 @@
-use serde::{Deserialize, Serialize};
-use serde_json;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{Command, Stdio, Child};
-use std::sync::{Arc, Mutex};
-use tauri::{State, AppHandle, Emitter, Manager};
-use uuid::Uuid;
-use std::io::{BufRead, BufReader};
-use std::thread;
 use axum::{routing::post, Router};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 mod mcp_manager;
-use mcp_manager::{McpManager, ApprovalRequest, ApprovalResponse, HttpAppState};
+use mcp_manager::{ApprovalRequest, ApprovalResponse, HttpAppState, McpManager};
 
 #[cfg(test)]
 mod tests;
@@ -53,12 +52,11 @@ pub struct ProcessOutput {
     pub timestamp: String,
 }
 
-
 fn parse_claude_json_line(line: &str) -> Option<String> {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(json) => {
             let message_type = json.get("type")?.as_str()?;
-            
+
             match message_type {
                 "system" => {
                     // System initialization - skip but could show basic info
@@ -71,14 +69,18 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
                 "assistant" => {
                     // Assistant messages contain the actual tool uses and responses
                     if let Some(message) = json.get("message") {
-                        if let Some(content_array) = message.get("content").and_then(|c| c.as_array()) {
+                        if let Some(content_array) =
+                            message.get("content").and_then(|c| c.as_array())
+                        {
                             let mut text_results = Vec::new();
-                            
+
                             // Collect text content and tool result summaries
                             for item in content_array {
                                 if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
                                     if item_type == "text" {
-                                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                        if let Some(text) =
+                                            item.get("text").and_then(|t| t.as_str())
+                                        {
                                             if !text.trim().is_empty() {
                                                 text_results.push(text.to_string());
                                             }
@@ -88,16 +90,27 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
                                         if let Some(content) = item.get("content") {
                                             if let Some(content_array) = content.as_array() {
                                                 for result_item in content_array {
-                                                    if let Some(result_text) = result_item.get("text").and_then(|t| t.as_str()) {
+                                                    if let Some(result_text) = result_item
+                                                        .get("text")
+                                                        .and_then(|t| t.as_str())
+                                                    {
                                                         if !result_text.trim().is_empty() {
                                                             // Add a brief prefix to indicate this is a tool result
-                                                            text_results.push(format!("Tool result: {}", result_text.trim()));
+                                                            text_results.push(format!(
+                                                                "Tool result: {}",
+                                                                result_text.trim()
+                                                            ));
                                                         }
                                                     }
                                                 }
-                                            } else if let Some(result_text) = content.get("text").and_then(|t| t.as_str()) {
+                                            } else if let Some(result_text) =
+                                                content.get("text").and_then(|t| t.as_str())
+                                            {
                                                 if !result_text.trim().is_empty() {
-                                                    text_results.push(format!("Tool result: {}", result_text.trim()));
+                                                    text_results.push(format!(
+                                                        "Tool result: {}",
+                                                        result_text.trim()
+                                                    ));
                                                 }
                                             }
                                         }
@@ -105,16 +118,18 @@ fn parse_claude_json_line(line: &str) -> Option<String> {
                                     // Still skip tool_use items to avoid "Using..." messages
                                 }
                             }
-                            
+
                             // Only show text content
                             if !text_results.is_empty() {
                                 let result = text_results.join("\n");
-                                eprintln!("FINAL RESPONSE: {}", result);
+                                eprintln!("FINAL RESPONSE: {result}");
                                 Some(result)
                             } else {
                                 None
                             }
-                        } else if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+                        } else if let Some(content) =
+                            message.get("content").and_then(|c| c.as_str())
+                        {
                             // Handle cases where content is a direct string
                             if !content.trim().is_empty() {
                                 Some(content.to_string())
@@ -177,7 +192,7 @@ async fn create_worktree(
     let worktree_path = PathBuf::from(&repo_path)
         .parent()
         .ok_or("Invalid repo path")?
-        .join(format!("worktree-{}", worktree_name));
+        .join(format!("worktree-{worktree_name}"));
 
     let output = Command::new("git")
         .arg("worktree")
@@ -188,7 +203,7 @@ async fn create_worktree(
         .arg("HEAD")
         .current_dir(&repo_path)
         .output()
-        .map_err(|e| format!("Failed to create worktree: {}", e))?;
+        .map_err(|e| format!("Failed to create worktree: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -232,7 +247,7 @@ async fn start_claude_process(
     permission_mode: Option<String>,
 ) -> Result<ClaudeProcess, String> {
     let process_id = Uuid::new_v4().to_string();
-    
+
     // Create the Claude process record
     let mut claude_process = ClaudeProcess {
         id: process_id.clone(),
@@ -250,9 +265,9 @@ async fn start_claude_process(
         .arg("--verbose")
         .arg("--output-format")
         .arg("stream-json");
-    
+
     // Set permission mode based on user preference
-    eprintln!("🔧 Permission mode: {:?}", permission_mode);
+    eprintln!("🔧 Permission mode: {permission_mode:?}");
     match permission_mode.as_deref().unwrap_or("safe") {
         "full" => {
             cmd.arg("--dangerously-skip-permissions");
@@ -260,11 +275,11 @@ async fn start_claude_process(
         "mcp" => {
             // Connect to our MCP server for this worktree
             // We need to find the server path for this worktree
-            eprintln!("🔍 Looking for MCP server for worktree: {}", worktree_id);
+            eprintln!("🔍 Looking for MCP server for worktree: {worktree_id}");
             let servers = state.mcp_manager.list_servers().await;
-            eprintln!("🔍 Available MCP servers: {:?}", servers);
+            eprintln!("🔍 Available MCP servers: {servers:?}");
             let server_for_worktree = servers.iter().find(|s| s.worktree_id == worktree_id);
-            
+
             if let Some(server_config) = server_for_worktree {
                 // Create MCP config JSON for Claude Code
                 let mcp_config = serde_json::json!({
@@ -279,21 +294,24 @@ async fn start_claude_process(
                         }
                     }
                 });
-                
+
                 // Write config to temporary file
-                let config_file = format!("/tmp/mcp_config_{}.json", worktree_id);
+                let config_file = format!("/tmp/mcp_config_{worktree_id}.json");
                 if let Err(e) = std::fs::write(&config_file, mcp_config.to_string()) {
-                    eprintln!("Failed to write MCP config: {}", e);
+                    eprintln!("Failed to write MCP config: {e}");
                     cmd.arg("--permission-mode").arg("acceptEdits");
                 } else {
-                    cmd.arg("--mcp-config").arg(&config_file)
+                    cmd.arg("--mcp-config")
+                        .arg(&config_file)
                         .arg("--permission-prompt-tool")
                         .arg("mcp__orchestra-worktree__approval_prompt");
                     eprintln!("🔗 Connecting Claude to MCP server: {} using config: {} with permission tool", 
                         server_config.server_id, config_file);
                 }
             } else {
-                eprintln!("⚠️  No MCP server found for worktree {}, falling back to safe mode", worktree_id);
+                eprintln!(
+                    "⚠️  No MCP server found for worktree {worktree_id}, falling back to safe mode"
+                );
                 cmd.arg("--permission-mode").arg("acceptEdits");
             }
         }
@@ -301,22 +319,31 @@ async fn start_claude_process(
             cmd.arg("--permission-mode").arg("acceptEdits");
         }
     }
-    
+
     let child = cmd
         .arg(&user_message)
         .current_dir(&worktree_path)
-        .env("APPROVAL_ENDPOINT", "http://localhost:8080/api/approval-request")
+        .env(
+            "APPROVAL_ENDPOINT",
+            "http://localhost:8080/api/approval-request",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start Claude Code: {}. Make sure 'claude' is installed and in PATH.", e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to start Claude Code: {e}. Make sure 'claude' is installed and in PATH."
+            )
+        })?;
 
     claude_process.pid = Some(child.id());
     claude_process.status = "running".to_string();
-    
-    eprintln!("CREATED CLAUDE PROCESS: ID={}, WorktreeID={}, PID={:?}", 
-        claude_process.id, claude_process.worktree_id, claude_process.pid);
+
+    eprintln!(
+        "CREATED CLAUDE PROCESS: ID={}, WorktreeID={}, PID={:?}",
+        claude_process.id, claude_process.worktree_id, claude_process.pid
+    );
 
     // Store the child process
     let child_arc = Arc::new(Mutex::new(Some(child)));
@@ -336,16 +363,16 @@ async fn start_claude_process(
     // Handle the child process in a thread
     let process_id_clone = process_id.clone();
     let app_handle_clone = app_handle.clone();
-    
+
     // Create completion_sent at the right scope level
     let completion_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    
+
     thread::spawn(move || {
         let child_opt = {
             let mut guard = child_arc.lock().unwrap();
             guard.take()
         };
-        
+
         if let Some(mut child) = child_opt {
             // Take stdout and stderr
             let stdout = child.stdout.take();
@@ -356,40 +383,48 @@ async fn start_claude_process(
                 let reader = BufReader::new(stdout);
                 let process_id_stdout = process_id_clone.clone();
                 let app_handle_stdout = app_handle_clone.clone();
-                
+
                 let completion_sent_clone = completion_sent.clone();
-                
+
                 thread::spawn(move || {
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            // Check if this is a result line (indicates completion)
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                                if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
-                                    if msg_type == "result" {
-                                        // Only emit completion once
-                                        if !completion_sent_clone.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                            eprintln!("COMPLETION: Process {} finished", process_id_stdout);
-                                            let _ = app_handle_stdout.emit("claude-completed", &serde_json::json!({
+                    for line in reader.lines().map_while(Result::ok) {
+                        // Check if this is a result line (indicates completion)
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
+                                if msg_type == "result" {
+                                    // Only emit completion once
+                                    if !completion_sent_clone
+                                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                                    {
+                                        eprintln!(
+                                            "COMPLETION: Process {process_id_stdout} finished"
+                                        );
+                                        let _ = app_handle_stdout.emit(
+                                            "claude-completed",
+                                            &serde_json::json!({
                                                 "process_id": process_id_stdout,
                                                 "success": true
-                                            }));
-                                        }
-                                        continue;
+                                            }),
+                                        );
                                     }
+                                    continue;
                                 }
                             }
-                            
-                            // Parse Claude's JSON output and extract meaningful content
-                            if let Some(parsed_content) = parse_claude_json_line(&line) {
-                                let output = ProcessOutput {
-                                    process_id: process_id_stdout.clone(),
-                                    content: parsed_content,
-                                    is_error: false,
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                };
-                                eprintln!("EMITTING CLAUDE-OUTPUT: Process={}, Content={}", output.process_id, output.content);
-                                let _ = app_handle_stdout.emit("claude-output", &output);
-                            }
+                        }
+
+                        // Parse Claude's JSON output and extract meaningful content
+                        if let Some(parsed_content) = parse_claude_json_line(&line) {
+                            let output = ProcessOutput {
+                                process_id: process_id_stdout.clone(),
+                                content: parsed_content,
+                                is_error: false,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                            };
+                            eprintln!(
+                                "EMITTING CLAUDE-OUTPUT: Process={}, Content={}",
+                                output.process_id, output.content
+                            );
+                            let _ = app_handle_stdout.emit("claude-output", &output);
                         }
                     }
                 });
@@ -400,18 +435,16 @@ async fn start_claude_process(
                 let reader = BufReader::new(stderr);
                 let process_id_stderr = process_id_clone.clone();
                 let app_handle_stderr = app_handle_clone.clone();
-                
+
                 thread::spawn(move || {
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            let output = ProcessOutput {
-                                process_id: process_id_stderr.clone(),
-                                content: line,
-                                is_error: true,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                            };
-                            let _ = app_handle_stderr.emit("claude-output", &output);
-                        }
+                    for line in reader.lines().map_while(Result::ok) {
+                        let output = ProcessOutput {
+                            process_id: process_id_stderr.clone(),
+                            content: line,
+                            is_error: true,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        };
+                        let _ = app_handle_stderr.emit("claude-output", &output);
                     }
                 });
             }
@@ -420,11 +453,13 @@ async fn start_claude_process(
             let process_id_wait = process_id_clone;
             let app_handle_wait = app_handle_clone;
             let completion_sent_wait = completion_sent;
-            
+
             thread::spawn(move || {
                 match child.wait() {
                     Ok(status) => {
-                        eprintln!("PROCESS WAIT: Process {} exited with status: {:?}", process_id_wait, status);
+                        eprintln!(
+                            "PROCESS WAIT: Process {process_id_wait} exited with status: {status:?}"
+                        );
                         // Only emit completion events for errors, not successful completion
                         if !status.success() {
                             let completion_output = ProcessOutput {
@@ -437,29 +472,39 @@ async fn start_claude_process(
                         }
                         // Only emit fallback completion if primary completion wasn't sent
                         if !completion_sent_wait.load(std::sync::atomic::Ordering::SeqCst) {
-                            eprintln!("FALLBACK COMPLETION: Emitting completion for process {}", process_id_wait);
-                            let _ = app_handle_wait.emit("claude-completed", &serde_json::json!({
-                                "process_id": process_id_wait,
-                                "success": status.success()
-                            }));
+                            eprintln!(
+                                "FALLBACK COMPLETION: Emitting completion for process {process_id_wait}"
+                            );
+                            let _ = app_handle_wait.emit(
+                                "claude-completed",
+                                &serde_json::json!({
+                                    "process_id": process_id_wait,
+                                    "success": status.success()
+                                }),
+                            );
                         } else {
-                            eprintln!("SKIPPING FALLBACK: Primary completion already sent for process {}", process_id_wait);
+                            eprintln!(
+                                "SKIPPING FALLBACK: Primary completion already sent for process {process_id_wait}"
+                            );
                         }
                     }
                     Err(e) => {
-                        eprintln!("PROCESS ERROR: Process {} failed: {}", process_id_wait, e);
+                        eprintln!("PROCESS ERROR: Process {process_id_wait} failed: {e}");
                         let completion_output = ProcessOutput {
                             process_id: process_id_wait.clone(),
-                            content: format!("Process error: {}", e),
+                            content: format!("Process error: {e}"),
                             is_error: true,
                             timestamp: chrono::Utc::now().to_rfc3339(),
                         };
                         let _ = app_handle_wait.emit("claude-output", &completion_output);
                         // Always emit completion for errors
-                        let _ = app_handle_wait.emit("claude-completed", &serde_json::json!({
-                            "process_id": process_id_wait,
-                            "success": false
-                        }));
+                        let _ = app_handle_wait.emit(
+                            "claude-completed",
+                            &serde_json::json!({
+                                "process_id": process_id_wait,
+                                "success": false
+                            }),
+                        );
                     }
                 }
             });
@@ -480,15 +525,20 @@ async fn send_message_to_claude(
 ) -> Result<(), String> {
     // For additional messages, we spawn a new Claude process
     // since --print mode exits after one response
-    let _process = start_claude_process(app_handle, state, worktree_path, worktree_id, message, permission_mode).await?;
+    let _process = start_claude_process(
+        app_handle,
+        state,
+        worktree_path,
+        worktree_id,
+        message,
+        permission_mode,
+    )
+    .await?;
     Ok(())
 }
 
 #[tauri::command]
-async fn stop_claude_process(
-    state: State<'_, AppState>,
-    process_id: String,
-) -> Result<(), String> {
+async fn stop_claude_process(state: State<'_, AppState>, process_id: String) -> Result<(), String> {
     let mut running_processes = state.running_processes.lock().unwrap();
     if let Some(child_arc) = running_processes.remove(&process_id) {
         if let Ok(mut child_guard) = child_arc.lock() {
@@ -528,7 +578,7 @@ async fn validate_git_repo(repo_path: String) -> Result<String, String> {
     if !std::path::Path::new(&repo_path).exists() {
         return Err("Directory does not exist".to_string());
     }
-    
+
     if !std::path::Path::new(&repo_path).is_dir() {
         return Err("Path is not a directory".to_string());
     }
@@ -568,7 +618,7 @@ async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, S
         .arg("--porcelain")
         .current_dir(&repo_path)
         .output()
-        .map_err(|e| format!("Failed to list git worktrees: {}", e))?;
+        .map_err(|e| format!("Failed to list git worktrees: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -580,14 +630,14 @@ async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, S
     let output_str = String::from_utf8_lossy(&output.stdout);
     let mut worktrees = Vec::new();
     let mut current_worktree: Option<GitWorktreeInfo> = None;
-    
+
     for line in output_str.lines() {
         if line.starts_with("worktree ") {
             // Save previous worktree if exists
             if let Some(wt) = current_worktree.take() {
                 worktrees.push(wt);
             }
-            
+
             let path = line.strip_prefix("worktree ").unwrap_or("").to_string();
             current_worktree = Some(GitWorktreeInfo {
                 path,
@@ -612,7 +662,7 @@ async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, S
             }
         }
     }
-    
+
     // Add the last worktree
     if let Some(wt) = current_worktree {
         worktrees.push(wt);
@@ -630,16 +680,14 @@ async fn list_git_worktrees(repo_path: String) -> Result<Vec<GitWorktreeInfo>, S
 }
 
 #[tauri::command]
-async fn check_worktree_status(
-    worktree_path: String,
-) -> Result<(bool, bool), String> {
+async fn check_worktree_status(worktree_path: String) -> Result<(bool, bool), String> {
     // First check if worktree has uncommitted changes
     let status_output = Command::new("git")
         .arg("status")
         .arg("--porcelain")
         .current_dir(&worktree_path)
         .output()
-        .map_err(|e| format!("Failed to check worktree status: {}", e))?;
+        .map_err(|e| format!("Failed to check worktree status: {e}"))?;
 
     if !status_output.status.success() {
         return Err(format!(
@@ -649,10 +697,10 @@ async fn check_worktree_status(
     }
 
     let has_changes = !status_output.stdout.is_empty();
-    
+
     // Check if branch has unpushed commits
     let branch_status = Command::new("git")
-        .args(&["log", "@{u}..", "--oneline"])
+        .args(["log", "@{u}..", "--oneline"])
         .current_dir(&worktree_path)
         .output();
 
@@ -681,7 +729,7 @@ async fn remove_worktree(
         .arg("--porcelain")
         .current_dir(&worktree_path)
         .output()
-        .map_err(|e| format!("Failed to check worktree status: {}", e))?;
+        .map_err(|e| format!("Failed to check worktree status: {e}"))?;
 
     if !status_output.status.success() {
         return Err(format!(
@@ -691,10 +739,10 @@ async fn remove_worktree(
     }
 
     let has_changes = !status_output.stdout.is_empty();
-    
+
     // Check if branch has unpushed commits
     let branch_status = Command::new("git")
-        .args(&["log", "@{u}..", "--oneline"])
+        .args(["log", "@{u}..", "--oneline"])
         .current_dir(&worktree_path)
         .output();
 
@@ -723,10 +771,10 @@ async fn remove_worktree(
 
     // Get the branch name associated with this worktree before deletion
     let branch_output = Command::new("git")
-        .args(&["branch", "--show-current"])
+        .args(["branch", "--show-current"])
         .current_dir(&worktree_path)
         .output();
-    
+
     let branch_name = if let Ok(output) = branch_output {
         if output.status.success() {
             let branch_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -744,20 +792,18 @@ async fn remove_worktree(
 
     // Remove the worktree
     let mut remove_cmd = Command::new("git");
-    remove_cmd
-        .arg("worktree")
-        .arg("remove");
-    
+    remove_cmd.arg("worktree").arg("remove");
+
     if force.unwrap_or(false) {
         remove_cmd.arg("--force");
     }
-    
+
     remove_cmd.arg(&worktree_path);
-    
+
     let output = remove_cmd
         .current_dir(&repo_path)
         .output()
-        .map_err(|e| format!("Failed to remove worktree: {}", e))?;
+        .map_err(|e| format!("Failed to remove worktree: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -769,24 +815,28 @@ async fn remove_worktree(
     // Delete the branch if we found one and it's not a main branch
     if let Some(branch) = branch_name {
         let delete_branch_output = Command::new("git")
-            .args(&["branch", "-D", &branch])
+            .args(["branch", "-D", &branch])
             .current_dir(&repo_path)
             .output();
-        
+
         if let Ok(output) = delete_branch_output {
             if !output.status.success() {
-                eprintln!("Warning: Failed to delete branch '{}': {}", 
-                    branch, String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "Warning: Failed to delete branch '{}': {}",
+                    branch,
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
     }
 
     // Also remove from backend state if it exists (for worktrees created via backend)
     let mut worktrees = state.worktrees.lock().unwrap();
-    let worktree_to_remove = worktrees.iter()
+    let worktree_to_remove = worktrees
+        .iter()
         .find(|(_, wt)| wt.path == worktree_path)
         .map(|(id, _)| id.clone());
-    
+
     if let Some(id) = worktree_to_remove {
         worktrees.remove(&id);
     }
@@ -803,14 +853,14 @@ async fn create_mcp_server(
     worktree_id: String,
     worktree_path: String,
 ) -> Result<String, String> {
-    state.mcp_manager.create_server(worktree_id, worktree_path, app_handle).await
+    state
+        .mcp_manager
+        .create_server(worktree_id, worktree_path, app_handle)
+        .await
 }
 
 #[tauri::command]
-async fn stop_mcp_server(
-    state: State<'_, AppState>,
-    server_id: String,
-) -> Result<(), String> {
+async fn stop_mcp_server(state: State<'_, AppState>, server_id: String) -> Result<(), String> {
     state.mcp_manager.stop_server(&server_id).await
 }
 
@@ -826,7 +876,10 @@ async fn get_mcp_server_status(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<bool, String> {
-    state.mcp_manager.get_server_status(&server_id).await
+    state
+        .mcp_manager
+        .get_server_status(&server_id)
+        .await
         .ok_or_else(|| "Server not found".to_string())
 }
 
@@ -844,7 +897,10 @@ async fn respond_to_approval(
     approval_id: String,
     response: ApprovalResponse,
 ) -> Result<(), String> {
-    state.mcp_manager.respond_to_approval(approval_id, response).await
+    state
+        .mcp_manager
+        .respond_to_approval(approval_id, response)
+        .await
 }
 
 #[tauri::command]
@@ -854,7 +910,6 @@ async fn get_pending_approvals(
     Ok(state.mcp_manager.get_pending_approvals().await)
 }
 
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -863,39 +918,42 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
-            
+
             // Clone data we need from state before spawning
             let pending_http_approvals = {
                 let state = app.state::<AppState>();
                 state.mcp_manager.pending_http_approvals.clone()
             };
-            
+
             tauri::async_runtime::spawn(async move {
                 // Create a new state that includes the app handle
                 let app_state = HttpAppState {
                     pending_http_approvals,
                     app_handle: Some(app_handle),
                 };
-                
+
                 // Start HTTP server
                 let app = Router::new()
-                    .route("/api/approval-request", post(crate::mcp_manager::handle_approval_request))
+                    .route(
+                        "/api/approval-request",
+                        post(crate::mcp_manager::handle_approval_request),
+                    )
                     .layer(CorsLayer::permissive())
                     .with_state(app_state);
 
                 eprintln!("🌐 RUST: Starting HTTP server on http://localhost:8080");
-                
+
                 let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
                     .await
                     .expect("Failed to bind to port 8080");
-                
+
                 eprintln!("🟢 RUST: HTTP server listening on http://localhost:8080");
-                
+
                 axum::serve(listener, app)
                     .await
                     .expect("HTTP server failed");
             });
-            
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

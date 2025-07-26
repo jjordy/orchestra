@@ -1,13 +1,10 @@
 #[cfg(test)]
-mod tests {
-    use crate::{
-        AppState, WorktreeConfig, ClaudeProcess, ProcessOutput, 
-        parse_claude_json_line
-    };
-    use crate::mcp_manager::{McpManager, ApprovalRequest};
-    use std::sync::{Arc, Mutex};
-    use std::collections::HashMap;
+mod unit_tests {
+    use crate::mcp_manager::{ApprovalRequest, McpManager};
+    use crate::{parse_claude_json_line, AppState, ClaudeProcess, ProcessOutput, WorktreeConfig};
     use chrono::Utc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     fn create_test_app_state() -> AppState {
         AppState {
@@ -21,9 +18,9 @@ mod tests {
     fn create_test_worktree(id: &str) -> WorktreeConfig {
         WorktreeConfig {
             id: id.to_string(),
-            name: format!("test-worktree-{}", id),
-            path: format!("/tmp/test-path-{}", id),
-            branch: format!("test-branch-{}", id),
+            name: format!("test-worktree-{id}"),
+            path: format!("/tmp/test-path-{id}"),
+            branch: format!("test-branch-{id}"),
             base_repo: "/tmp/test-repo".to_string(),
             is_active: true,
             created_at: Utc::now().to_rfc3339(),
@@ -46,7 +43,10 @@ mod tests {
     fn test_claude_json_parsing() {
         // Test Claude JSON message parsing
         let test_cases = vec![
-            (r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#, Some("Hello world".to_string())),
+            (
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#,
+                Some("Hello world".to_string()),
+            ),
             (r#"{"type":"user","content":"test"}"#, None),
             (r#"{"type":"system","content":"init"}"#, None),
             (r#"{"type":"result","content":"done"}"#, None),
@@ -55,14 +55,14 @@ mod tests {
 
         for (input, expected) in test_cases {
             let result = parse_claude_json_line(input);
-            assert_eq!(result, expected, "Failed for input: {}", input);
+            assert_eq!(result, expected, "Failed for input: {input}");
         }
     }
 
     #[test]
     fn test_app_state_default() {
         let state = AppState::default();
-        
+
         assert!(state.worktrees.lock().unwrap().is_empty());
         assert!(state.processes.lock().unwrap().is_empty());
         assert!(state.running_processes.lock().unwrap().is_empty());
@@ -84,7 +84,7 @@ mod tests {
         // Test that serialization works
         let json = serde_json::to_string(&process).unwrap();
         let deserialized: ClaudeProcess = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(process.id, deserialized.id);
         assert_eq!(process.status, deserialized.status);
         assert_eq!(process.pid, deserialized.pid);
@@ -104,7 +104,7 @@ mod tests {
 
         let json = serde_json::to_string(&worktree).unwrap();
         let deserialized: WorktreeConfig = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(worktree.id, deserialized.id);
         assert_eq!(worktree.name, deserialized.name);
         assert_eq!(worktree.path, deserialized.path);
@@ -114,21 +114,29 @@ mod tests {
     #[tokio::test]
     async fn test_list_worktrees() {
         let state = create_test_app_state();
-        
+
         // Add multiple test worktrees
         let worktree1 = create_test_worktree("1");
         let worktree2 = create_test_worktree("2");
-        
-        state.worktrees.lock().unwrap().insert("1".to_string(), worktree1);
-        state.worktrees.lock().unwrap().insert("2".to_string(), worktree2);
+
+        state
+            .worktrees
+            .lock()
+            .unwrap()
+            .insert("1".to_string(), worktree1);
+        state
+            .worktrees
+            .lock()
+            .unwrap()
+            .insert("2".to_string(), worktree2);
 
         // Note: In real tests we'd need proper Tauri state handling
         // For now, test the underlying logic
         let worktrees = state.worktrees.lock().unwrap();
         let result: Vec<WorktreeConfig> = worktrees.values().cloned().collect();
-        
+
         assert_eq!(result.len(), 2);
-        
+
         // Verify worktrees are returned in consistent order
         let ids: Vec<String> = result.iter().map(|w| w.id.clone()).collect();
         assert!(ids.contains(&"1".to_string()));
@@ -139,22 +147,30 @@ mod tests {
     fn test_process_state_management() {
         let state = create_test_app_state();
         let process_id = "test-process-1";
-        
+
         // Add a running process
         let mut process = create_test_process(process_id, "worktree-1");
-        state.processes.lock().unwrap().insert(process_id.to_string(), process.clone());
-        
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert(process_id.to_string(), process.clone());
+
         // Test process retrieval
         let processes = state.processes.lock().unwrap();
         let retrieved = processes.get(process_id).unwrap();
         assert_eq!(retrieved.id, process_id);
         assert_eq!(retrieved.status, "running");
-        
+
         // Test process status update
         drop(processes);
         process.status = "stopped".to_string();
-        state.processes.lock().unwrap().insert(process_id.to_string(), process);
-        
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert(process_id.to_string(), process);
+
         let updated_processes = state.processes.lock().unwrap();
         let updated = updated_processes.get(process_id).unwrap();
         assert_eq!(updated.status, "stopped");
@@ -163,18 +179,26 @@ mod tests {
     #[test]
     fn test_list_processes_logic() {
         let state = create_test_app_state();
-        
+
         // Add multiple processes
         let process1 = create_test_process("process-1", "worktree-1");
         let process2 = create_test_process("process-2", "worktree-2");
-        
-        state.processes.lock().unwrap().insert("process-1".to_string(), process1);
-        state.processes.lock().unwrap().insert("process-2".to_string(), process2);
+
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert("process-1".to_string(), process1);
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert("process-2".to_string(), process2);
 
         // Test the underlying logic that list_processes uses
         let processes = state.processes.lock().unwrap();
         let result: Vec<ClaudeProcess> = processes.values().cloned().collect();
-        
+
         assert_eq!(result.len(), 2);
         let ids: Vec<String> = result.iter().map(|p| p.id.clone()).collect();
         assert!(ids.contains(&"process-1".to_string()));
@@ -185,20 +209,28 @@ mod tests {
     fn test_worktree_removal_logic() {
         let state = create_test_app_state();
         let worktree_id = "worktree-1";
-        
+
         // Add worktree and associated process
         let worktree = create_test_worktree(worktree_id);
         let process = create_test_process("process-1", worktree_id);
-        
-        state.worktrees.lock().unwrap().insert(worktree_id.to_string(), worktree);
-        state.processes.lock().unwrap().insert("process-1".to_string(), process);
+
+        state
+            .worktrees
+            .lock()
+            .unwrap()
+            .insert(worktree_id.to_string(), worktree);
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert("process-1".to_string(), process);
 
         // Test removal logic (simulating what remove_worktree does)
         state.worktrees.lock().unwrap().remove(worktree_id);
-        
+
         // Verify worktree was removed
         assert!(!state.worktrees.lock().unwrap().contains_key(worktree_id));
-        
+
         // In real implementation, associated processes would also be cleaned up
         let processes = state.processes.lock().unwrap();
         let process_exists = processes.values().any(|p| p.worktree_id == worktree_id);
@@ -231,7 +263,11 @@ mod tests {
             let state_clone = state.clone();
             let handle = std::thread::spawn(move || {
                 let worktree = create_test_worktree(&i.to_string());
-                state_clone.worktrees.lock().unwrap().insert(i.to_string(), worktree);
+                state_clone
+                    .worktrees
+                    .lock()
+                    .unwrap()
+                    .insert(i.to_string(), worktree);
             });
             handles.push(handle);
         }
@@ -253,31 +289,43 @@ mod tests {
             // Missing type field
             (r#"{"content":"test"}"#, None),
             // Nested content structure
-            (r#"{"type":"assistant","message":{"content":[{"type":"text","text":"nested"}]}}"#, Some("nested".to_string())),
+            (
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"nested"}]}}"#,
+                Some("nested".to_string()),
+            ),
             // Empty content array
             (r#"{"type":"assistant","message":{"content":[]}}"#, None),
             // Multiple content items (our parser concatenates them)
-            (r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}"#, Some("first\nsecond".to_string())),
+            (
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}"#,
+                Some("first\nsecond".to_string()),
+            ),
             // Unicode content
-            (r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello 世界 🌍"}]}}"#, Some("Hello 世界 🌍".to_string())),
+            (
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello 世界 🌍"}]}}"#,
+                Some("Hello 世界 🌍".to_string()),
+            ),
             // Escaped characters
-            (r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Line 1\nLine 2\tTab"}]}}"#, Some("Line 1\nLine 2\tTab".to_string())),
+            (
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Line 1\nLine 2\tTab"}]}}"#,
+                Some("Line 1\nLine 2\tTab".to_string()),
+            ),
         ];
 
         for (input, expected) in test_cases {
             let result = parse_claude_json_line(input);
-            assert_eq!(result, expected, "Failed for input: {}", input);
+            assert_eq!(result, expected, "Failed for input: {input}");
         }
     }
 
     #[tokio::test]
     async fn test_mcp_manager_initialization() {
         let manager = McpManager::new();
-        
+
         // Should start with no servers
         let servers = manager.list_servers().await;
         assert!(servers.is_empty());
-        
+
         // Should start with no pending approvals
         let approvals = manager.get_pending_approvals().await;
         assert!(approvals.is_empty());
@@ -286,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_approval_workflow() {
         let manager = McpManager::new();
-        
+
         // Create an approval request
         let request = ApprovalRequest {
             tool_name: "test_tool".to_string(),
@@ -294,11 +342,11 @@ mod tests {
             worktree_id: "test-worktree".to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
         };
-        
+
         // Request approval
         let approval_id = manager.request_approval(request.clone()).await.unwrap();
         assert!(!approval_id.is_empty());
-        
+
         // Should appear in pending approvals
         let pending = manager.get_pending_approvals().await;
         assert_eq!(pending.len(), 1);
@@ -311,7 +359,7 @@ mod tests {
         // Test that MCP server IDs are unique and properly formatted
         let worktree_id = "test-worktree";
         let worktree_path = "/tmp/test";
-        
+
         // In real implementation, server IDs should be unique UUIDs
         assert!(!worktree_id.is_empty());
         assert!(!worktree_path.is_empty());
